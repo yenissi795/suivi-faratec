@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
-import { Package, Plus } from "lucide-react";
+import { Package, Plus, Truck, X } from "lucide-react";
 
 interface Equipement {
   id: string;
@@ -11,6 +11,7 @@ interface Equipement {
   date_entree: string;
   statut: string;
   pourcentage_global: number;
+  date_livraison_reelle: string | null;
 }
 
 const statusLabels: Record<string, string> = {
@@ -23,7 +24,7 @@ const statusColors: Record<string, string> = {
   en_attente: "bg-slate-100 text-slate-600",
   en_reparation: "bg-amber-100 text-amber-700",
   termine: "bg-green-100 text-green-700",
-  livre: "bg-amber-100 text-amber-700",
+  livre: "bg-violet-100 text-violet-700",
 };
 
 export default function EquipementsPage() {
@@ -36,6 +37,7 @@ export default function EquipementsPage() {
   const [reference, setReference] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
+  const [confirmLivre, setConfirmLivre] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -77,6 +79,19 @@ export default function EquipementsPage() {
     load();
   };
 
+  // Marque l'équipement comme livré — enregistre la VRAIE date de sortie
+  // (contrairement au % qui peut être atteint sans que le client soit venu
+  // récupérer sa machine). C'est cette date qui permettra plus tard de
+  // calculer un vrai temps moyen de réparation dans les Rapports.
+  const handleMarquerLivre = async (id: string) => {
+    await supabase
+      .from("equipements")
+      .update({ statut: "livre", date_livraison_reelle: new Date().toISOString().slice(0, 10) })
+      .eq("id", id);
+    setConfirmLivre(null);
+    load();
+  };
+
   return (
     <div className="space-y-6">
       <div>
@@ -112,7 +127,7 @@ export default function EquipementsPage() {
             className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
           />
         </div>
-        <button onClick={handleAdd} disabled={saving} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-neutral-900 rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50">
+        <button onClick={handleAdd} disabled={saving} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-neutral-900 rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50">
           <Plus size={16} />
           {saving ? "Enregistrement..." : "Ajouter"}
         </button>
@@ -136,7 +151,8 @@ export default function EquipementsPage() {
                 <th className="pb-2 pr-4 font-medium">Référence</th>
                 <th className="pb-2 pr-4 font-medium">Entrée</th>
                 <th className="pb-2 pr-4 font-medium">Statut</th>
-                <th className="pb-2 font-medium text-right">Avancement</th>
+                <th className="pb-2 pr-4 font-medium text-right">Avancement</th>
+                <th className="pb-2 font-medium text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50">
@@ -151,13 +167,37 @@ export default function EquipementsPage() {
                       {statusLabels[e.statut] || e.statut}
                     </span>
                   </td>
-                  <td className="py-2 text-right">
+                  <td className="py-2 pr-4 text-right">
                     <div className="flex items-center justify-end gap-2">
                       <div className="w-20 h-1.5 bg-slate-100 rounded-full overflow-hidden">
                         <div className="h-full bg-amber-500" style={{ width: `${e.pourcentage_global}%` }} />
                       </div>
                       <span className="font-medium text-slate-700 w-10 text-right">{e.pourcentage_global}%</span>
                     </div>
+                  </td>
+                  <td className="py-2 text-right">
+                    {e.statut === "livre" ? (
+                      <span className="text-xs text-slate-400">
+                        Livré le {e.date_livraison_reelle ? new Date(e.date_livraison_reelle).toLocaleDateString("fr-FR") : "—"}
+                      </span>
+                    ) : confirmLivre === e.id ? (
+                      <span className="flex items-center justify-end gap-2">
+                        <button onClick={() => handleMarquerLivre(e.id)} className="text-green-700 text-xs font-semibold">
+                          Confirmer
+                        </button>
+                        <button onClick={() => setConfirmLivre(null)} className="text-slate-400">
+                          <X size={14} />
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmLivre(e.id)}
+                        className="flex items-center gap-1 text-xs font-medium text-violet-700 border border-violet-200 hover:bg-violet-50 rounded-lg px-2 py-1 ml-auto"
+                      >
+                        <Truck size={13} />
+                        Marquer livré
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}

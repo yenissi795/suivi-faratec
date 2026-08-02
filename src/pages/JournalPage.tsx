@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
-import { ClipboardList, Camera, X } from "lucide-react";
+import { ClipboardList, Camera, X, Plus } from "lucide-react";
 
 interface Equipement {
   id: string;
@@ -40,7 +40,13 @@ export default function JournalPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
+  // --- Équipement : existant OU nouveau (créé à la volée) ---
+  const [equipementMode, setEquipementMode] = useState<"existing" | "new">("existing");
   const [equipementId, setEquipementId] = useState("");
+  const [newClientName, setNewClientName] = useState("");
+  const [newTypeEquipement, setNewTypeEquipement] = useState("");
+  const [newReference, setNewReference] = useState("");
+
   const [atelierId, setAtelierId] = useState("");
   const [technicienId, setTechnicienId] = useState("");
   const [pourcentage, setPourcentage] = useState("");
@@ -83,7 +89,11 @@ export default function JournalPage() {
 
   const validate = () => {
     const errs: Record<string, string> = {};
-    if (!equipementId) errs.equipementId = "Sélectionne un équipement.";
+    if (equipementMode === "existing" && !equipementId) errs.equipementId = "Sélectionne un équipement.";
+    if (equipementMode === "new") {
+      if (!newClientName.trim()) errs.newClientName = "Le nom du client est obligatoire.";
+      if (!newTypeEquipement.trim()) errs.newTypeEquipement = "Le type d'équipement est obligatoire.";
+    }
     if (!atelierId) errs.atelierId = "Sélectionne un atelier.";
     if (pourcentage === "") errs.pourcentage = "Le pourcentage est obligatoire.";
     else if (Number(pourcentage) < 0 || Number(pourcentage) > 100) errs.pourcentage = "Doit être entre 0 et 100.";
@@ -93,17 +103,40 @@ export default function JournalPage() {
 
   const handleSave = async () => {
     if (!validate() || !user) return;
-
-    const currentEquipement = equipements.find((e) => e.id === equipementId);
     const newPct = Number(pourcentage);
-    if (currentEquipement && newPct < currentEquipement.pourcentage_global) {
-      setWarning(
-        `⚠️ Vous descendez de ${currentEquipement.pourcentage_global}% à ${newPct}%. Cliquez à nouveau sur "Enregistrer" pour confirmer, ou modifiez la valeur.`
-      );
-      return;
+
+    let finalEquipementId = equipementId;
+
+    if (equipementMode === "existing") {
+      const currentEquipement = equipements.find((e) => e.id === equipementId);
+      if (currentEquipement && newPct < currentEquipement.pourcentage_global && !warning) {
+        setWarning(
+          `⚠️ Vous descendez de ${currentEquipement.pourcentage_global}% à ${newPct}%. Cliquez à nouveau sur "Enregistrer" pour confirmer, ou modifiez la valeur.`
+        );
+        return;
+      }
     }
     setWarning("");
     setSaving(true);
+
+    if (equipementMode === "new") {
+      const { data: newEq, error: newEqError } = await supabase
+        .from("equipements")
+        .insert({
+          client_name: newClientName.trim(),
+          type_equipement: newTypeEquipement.trim(),
+          reference: newReference.trim() || null,
+          owner_id: user.id,
+        })
+        .select()
+        .single();
+      if (newEqError || !newEq) {
+        setSaving(false);
+        setErrors({ newClientName: "Erreur lors de la création de l'équipement." });
+        return;
+      }
+      finalEquipementId = newEq.id;
+    }
 
     let photoUrl: string | null = null;
     if (photoFile) {
@@ -119,7 +152,7 @@ export default function JournalPage() {
 
     await supabase.from("journal_passages").insert({
       owner_id: user.id,
-      equipement_id: equipementId,
+      equipement_id: finalEquipementId,
       atelier_id: atelierId,
       technicien_id: technicienId || null,
       pourcentage: newPct,
@@ -127,10 +160,18 @@ export default function JournalPage() {
       photo_url: photoUrl,
     });
 
-    // Met à jour le % global de l'équipement (dernière observation)
-    await supabase.from("equipements").update({ pourcentage_global: newPct }).eq("id", equipementId);
+    // Statut automatique : en_attente -> en_reparation dès la 1ère observation,
+    // puis -> termine dès que le pourcentage atteint 100%. "Livré" reste une
+    // action manuelle distincte (le client doit être réellement venu le
+    // récupérer, ça ne se déduit pas automatiquement du %).
+    const nouveauStatut = newPct >= 100 ? "termine" : "en_reparation";
+    await supabase.from("equipements").update({ pourcentage_global: newPct, statut: nouveauStatut }).eq("id", finalEquipementId);
 
+    setEquipementMode("existing");
     setEquipementId("");
+    setNewClientName("");
+    setNewTypeEquipement("");
+    setNewReference("");
     setAtelierId("");
     setTechnicienId("");
     setPourcentage("");
@@ -152,89 +193,135 @@ export default function JournalPage() {
       <div className="bg-white rounded-xl p-5 shadow-sm space-y-3">
         <h2 className="font-semibold text-slate-700 text-sm">Nouvelle observation</h2>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <div>
-            <select
-              value={equipementId}
-              onChange={(e) => { setEquipementId(e.target.value); setErrors((prev) => ({ ...prev, equipementId: "" })); }}
-              className={`w-full border rounded-lg px-3 py-2 text-sm ${errors.equipementId ? "border-red-400" : "border-slate-200"}`}
-            >
-              <option value="">Sélectionner un équipement</option>
-              {equipements.map((eq) => (
-                <option key={eq.id} value={eq.id}>
-                  {eq.client_name} — {eq.type_equipement} ({eq.pourcentage_global}%)
-                </option>
-              ))}
-            </select>
-            {errors.equipementId && <p className="text-xs text-red-600 mt-1">{errors.equipementId}</p>}
-          </div>
-          <div>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => { setEquipementMode("existing"); setErrors({}); }}
+            className={`text-xs font-medium rounded-lg px-3 py-1.5 ${equipementMode === "existing" ? "bg-amber-500 text-neutral-900" : "bg-slate-100 text-slate-600"}`}
+          >
+            Équipement existant
+          </button>
+          <button
+            type="button"
+            onClick={() => { setEquipementMode("new"); setErrors({}); }}
+            className={`flex items-center gap-1 text-xs font-medium rounded-lg px-3 py-1.5 ${equipementMode === "new" ? "bg-amber-500 text-neutral-900" : "bg-slate-100 text-slate-600"}`}
+          >
+            <Plus size={12} />
+            Nouvel équipement
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-start gap-2">
+          {equipementMode === "existing" ? (
+            <div className="flex-1 min-w-[220px]">
+              <select
+                value={equipementId}
+                onChange={(e) => { setEquipementId(e.target.value); setErrors((p) => ({ ...p, equipementId: "" })); }}
+                className={`w-full border rounded-lg px-3 py-2 text-sm ${errors.equipementId ? "border-red-400" : "border-slate-200"}`}
+              >
+                <option value="">Équipement</option>
+                {equipements.map((eq) => (
+                  <option key={eq.id} value={eq.id}>
+                    {eq.client_name} — {eq.type_equipement} ({eq.pourcentage_global}%)
+                  </option>
+                ))}
+              </select>
+              {errors.equipementId && <p className="text-xs text-red-600 mt-1">{errors.equipementId}</p>}
+            </div>
+          ) : (
+            <>
+              <div className="flex-1 min-w-[140px]">
+                <input
+                  placeholder="Nom du client"
+                  value={newClientName}
+                  onChange={(e) => { setNewClientName(e.target.value); setErrors((p) => ({ ...p, newClientName: "" })); }}
+                  className={`w-full border rounded-lg px-3 py-2 text-sm ${errors.newClientName ? "border-red-400" : "border-slate-200"}`}
+                />
+                {errors.newClientName && <p className="text-xs text-red-600 mt-1">{errors.newClientName}</p>}
+              </div>
+              <div className="flex-1 min-w-[140px]">
+                <input
+                  placeholder="Type d'équipement"
+                  value={newTypeEquipement}
+                  onChange={(e) => { setNewTypeEquipement(e.target.value); setErrors((p) => ({ ...p, newTypeEquipement: "" })); }}
+                  className={`w-full border rounded-lg px-3 py-2 text-sm ${errors.newTypeEquipement ? "border-red-400" : "border-slate-200"}`}
+                />
+                {errors.newTypeEquipement && <p className="text-xs text-red-600 mt-1">{errors.newTypeEquipement}</p>}
+              </div>
+              <input
+                placeholder="Référence (optionnel)"
+                value={newReference}
+                onChange={(e) => setNewReference(e.target.value)}
+                className="flex-1 min-w-[140px] border border-slate-200 rounded-lg px-3 py-2 text-sm"
+              />
+            </>
+          )}
+
+          <div className="min-w-[160px]">
             <select
               value={atelierId}
-              onChange={(e) => { setAtelierId(e.target.value); setErrors((prev) => ({ ...prev, atelierId: "" })); }}
+              onChange={(e) => { setAtelierId(e.target.value); setErrors((p) => ({ ...p, atelierId: "" })); }}
               className={`w-full border rounded-lg px-3 py-2 text-sm ${errors.atelierId ? "border-red-400" : "border-slate-200"}`}
             >
-              <option value="">Sélectionner un atelier</option>
+              <option value="">Atelier</option>
               {ateliers.map((a) => (
                 <option key={a.id} value={a.id}>{a.name}</option>
               ))}
             </select>
             {errors.atelierId && <p className="text-xs text-red-600 mt-1">{errors.atelierId}</p>}
           </div>
-        </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <select value={technicienId} onChange={(e) => setTechnicienId(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">
-            <option value="">Technicien (optionnel)</option>
+          <select value={technicienId} onChange={(e) => setTechnicienId(e.target.value)} className="min-w-[150px] border border-slate-200 rounded-lg px-3 py-2 text-sm">
+            <option value="">Technicien</option>
             {techniciens.map((t) => (
               <option key={t.id} value={t.id}>{t.full_name}</option>
             ))}
           </select>
-          <div>
+
+          <div className="w-28">
             <input
               type="number"
               min={0}
               max={100}
-              placeholder="Pourcentage d'avancement (%)"
+              placeholder="%"
               value={pourcentage}
-              onChange={(e) => { setPourcentage(e.target.value); setErrors((prev) => ({ ...prev, pourcentage: "" })); }}
+              onChange={(e) => { setPourcentage(e.target.value); setErrors((p) => ({ ...p, pourcentage: "" })); }}
               className={`w-full border rounded-lg px-3 py-2 text-sm ${errors.pourcentage ? "border-red-400" : "border-slate-200"}`}
             />
             {errors.pourcentage && <p className="text-xs text-red-600 mt-1">{errors.pourcentage}</p>}
           </div>
-        </div>
 
-        <input
-          placeholder="Commentaire (optionnel)"
-          value={commentaire}
-          onChange={(e) => setCommentaire(e.target.value)}
-          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm"
-        />
+          <input
+            placeholder="Commentaire (optionnel)"
+            value={commentaire}
+            onChange={(e) => setCommentaire(e.target.value)}
+            className="flex-1 min-w-[160px] border border-slate-200 rounded-lg px-3 py-2 text-sm"
+          />
 
-        <div>
-          <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer w-fit border border-slate-200 rounded-lg px-3 py-2 hover:bg-slate-50">
+          <label className="flex items-center gap-2 text-xs font-medium text-slate-600 cursor-pointer border border-slate-200 rounded-lg px-3 py-2 hover:bg-slate-50 whitespace-nowrap">
             <Camera size={16} />
-            {photoFile ? "Changer la photo" : "Ajouter une photo"}
+            Photo
             <input type="file" accept="image/*" capture="environment" onChange={handlePhotoChange} className="hidden" />
           </label>
-          {photoPreview && (
-            <div className="relative w-32 mt-2">
-              <img src={photoPreview} alt="Aperçu" className="w-32 h-32 object-cover rounded-lg" />
-              <button
-                onClick={() => { setPhotoFile(null); setPhotoPreview(null); }}
-                className="absolute -top-2 -right-2 bg-white rounded-full p-1 shadow"
-              >
-                <X size={14} className="text-red-500" />
-              </button>
-            </div>
-          )}
+
+          <button onClick={handleSave} disabled={saving} className="bg-amber-500 hover:bg-amber-600 text-neutral-900 rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-50 whitespace-nowrap">
+            {saving ? "Enregistrement..." : "Enregistrer"}
+          </button>
         </div>
 
-        {warning && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{warning}</p>}
+        {photoPreview && (
+          <div className="relative w-24">
+            <img src={photoPreview} alt="Aperçu" className="w-24 h-24 object-cover rounded-lg" />
+            <button
+              onClick={() => { setPhotoFile(null); setPhotoPreview(null); }}
+              className="absolute -top-2 -right-2 bg-white rounded-full p-1 shadow"
+            >
+              <X size={14} className="text-red-500" />
+            </button>
+          </div>
+        )}
 
-        <button onClick={handleSave} disabled={saving} className="bg-amber-500 hover:bg-amber-600 text-neutral-900 rounded-lg px-4 py-2 text-sm font-medium disabled:opacity-50">
-          {saving ? "Enregistrement..." : "Enregistrer"}
-        </button>
+        {warning && <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">{warning}</p>}
       </div>
 
       <div className="bg-white rounded-xl p-5 shadow-sm">
