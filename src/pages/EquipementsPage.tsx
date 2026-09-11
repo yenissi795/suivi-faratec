@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
 import {
-  Package, Plus, Search, Edit3, Truck, Trash2, X, Loader2, Info,
+    Package, Plus, Search, Edit3, Truck, Trash2, X, Loader2,
   Clock, CheckCircle2, AlertTriangle, ChevronDown, ChevronUp, History,
   Sparkles, Filter
 } from "lucide-react";
