@@ -18,7 +18,7 @@ export default function TechniciensPage() {
   const { user } = useAuth();
   const [techniciens, setTechniciens] = useState<Technicien[]>([]);
   const [ateliers, setAteliers] = useState<Atelier[]>([]);
-  const [assignments, setAssignments] = useState<Record<string, string[]>>({}); // technicien_id -> atelier_id[]
+  const [assignments, setAssignments] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
 
   const [newName, setNewName] = useState("");
@@ -54,7 +54,7 @@ export default function TechniciensPage() {
 
   const handleAdd = async () => {
     if (!newName.trim()) {
-      setError("Le nom du technicien est obligatoire.");
+      setError("Le nom de l'opérateur est obligatoire.");
       return;
     }
     if (!user) return;
@@ -85,12 +85,12 @@ export default function TechniciensPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-xl font-bold text-slate-800">Techniciens</h1>
-        <p className="text-sm text-slate-500">Gérez les techniciens et leurs ateliers de spécialité.</p>
+        <h1 className="text-xl font-bold text-slate-800">Opérateurs</h1>
+        <p className="text-sm text-slate-500">Gérez les opérateurs et leurs ateliers de spécialité.</p>
       </div>
 
       <div className="bg-white rounded-xl p-5 shadow-sm space-y-3">
-        <h2 className="font-semibold text-slate-700 text-sm">Ajouter un technicien</h2>
+        <h2 className="font-semibold text-slate-700 text-sm">Ajouter un opérateur</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
           <input
             placeholder="Nom complet"
@@ -127,18 +127,18 @@ export default function TechniciensPage() {
 
         <button onClick={handleAdd} className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-neutral-900 rounded-lg px-4 py-2 text-sm font-medium">
           <Plus size={16} />
-          Ajouter le technicien
+          Ajouter l'opérateur
         </button>
       </div>
 
       <div className="bg-white rounded-xl p-5 shadow-sm">
-        <h2 className="font-semibold text-slate-700 text-sm mb-3">Liste des techniciens</h2>
+        <h2 className="font-semibold text-slate-700 text-sm mb-3">Liste des opérateurs</h2>
         {loading ? (
           <p className="text-sm text-slate-400">Chargement...</p>
         ) : techniciens.length === 0 ? (
           <div className="text-center py-8">
             <Users size={32} className="mx-auto text-slate-300 mb-2" />
-            <p className="text-sm text-slate-400">Aucun technicien pour l'instant.</p>
+            <p className="text-sm text-slate-400">Aucun opérateur pour l'instant.</p>
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
