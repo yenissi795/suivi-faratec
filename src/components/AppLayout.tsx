@@ -2,7 +2,8 @@ import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import {
-  Home, Package, Users, ClipboardList, FileBarChart, LogOut, Menu, X, Factory, Gauge, ArrowLeft,
+  Home, Package, Users, ClipboardList, FileBarChart, LogOut, Menu, X,
+  Factory, Gauge, ArrowLeft, Settings, Timer, Calculator, Eye,
 } from "lucide-react";
 import logo from "../assets/logo-faratec.png";
 
@@ -12,8 +13,12 @@ const links = [
   { to: "/equipements", label: "Équipements", icon: Package },
   { to: "/journal", label: "Journal / Tournée", icon: ClipboardList },
   { to: "/ateliers", label: "Ateliers", icon: Factory },
-  { to: "/techniciens", label: "Techniciens", icon: Users },
+  { to: "/operateurs", label: "Opérateurs", icon: Users },
+  { to: "/temps-operateurs", label: "Temps opérateurs", icon: Timer },
+  { to: "/couts", label: "Coûts", icon: Calculator },  
+  { to: "/vue-client", label: "Vue Client", icon: Eye },                  // ← AJOUT
   { to: "/rapports", label: "Rapports", icon: FileBarChart },
+  { to: "/parametres", label: "Paramètres", icon: Settings },
 ];
 
 export default function AppLayout() {

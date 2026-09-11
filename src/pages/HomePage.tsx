@@ -11,7 +11,7 @@ const modules = [
   { to: "/journal", label: "Journal / Tournée", image: tileJournal },
   { to: "/equipements", label: "Équipements", image: tileEquipements },
   { to: "/ateliers", label: "Ateliers", image: tileAteliers },
-  { to: "/techniciens", label: "Operateurs", image: tileTechniciens },
+  { to: "/operateurs", label: "Opérateurs", image: tileTechniciens },
   { to: "/rapports", label: "Rapports", image: tileRapports },
 ];
 

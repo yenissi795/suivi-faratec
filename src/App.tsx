@@ -1,13 +1,17 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
+import ParametresPage from "./pages/ParametresPage";
+import TempsOperateursPage from "./pages/TempsOperateursPage";
 
 // --- IMPORTS DES PAGES ---
+import VueClientPage from "./pages/VueClientPage";
+import CoutsPage from "./pages/CoutsPage";
 import AuthPage from "./pages/AuthPage";
 import DashboardPage from "./pages/DashboardPage";
 import EquipementsPage from "./pages/EquipementsPage";
 import JournalPage from "./pages/JournalPage";
 import AteliersPage from "./pages/AteliersPage";
-import TechniciensPage from "./pages/TechniciensPage"; // <-- AJOUT
+import OperateursPage from "./pages/OperateursPage";
 import HomePage from "./pages/HomePage";
 import RapportsPage from "./pages/RapportsPage";
 
@@ -36,8 +40,12 @@ export default function App() {
         <Route path="/equipements" element={<EquipementsPage />} />
         <Route path="/journal" element={<JournalPage />} />
         <Route path="/ateliers" element={<AteliersPage />} />
-        <Route path="/techniciens" element={<TechniciensPage />} /> {/* <-- AJOUT */}
+        <Route path="/operateurs" element={<OperateursPage />} />
         <Route path="/rapports" element={<RapportsPage />} />
+        <Route path="/parametres" element={<ParametresPage />} />
+        <Route path="/temps-operateurs" element={<TempsOperateursPage />} />
+        <Route path="/vue-client" element={<VueClientPage />} />
+        <Route path="/couts" element={<CoutsPage />} />
       </Route>
       
       {/* Si connecté, /auth renvoie vers l'accueil */}

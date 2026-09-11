@@ -1,10 +1,11 @@
 import { useEffect, useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
 import {
-    Package, Plus, Search, Edit3, Truck, Trash2, X, Loader2,
+  Package, Plus, Search, Edit3, Truck, Trash2, X, Loader2,
   Clock, CheckCircle2, AlertTriangle, ChevronDown, ChevronUp, History,
-  Sparkles, Filter
+  Sparkles, Filter, ZoomIn, Zap, Calculator
 } from "lucide-react";
 
 // --- TYPES ---
@@ -12,7 +13,7 @@ interface Equipement {
   id: string;
   client_name: string;
   type_equipement: string;
-  reference: string | null;
+  code_faratec: string | null;
   marque: string | null;
   puissance_kw: number | null;
   operateur: string | null;
@@ -20,18 +21,29 @@ interface Equipement {
   statut: string;
   date_livraison_reelle: string | null;
   created_at: string;
+  ndi_da_ns: string | null;
+  mle_reference: string | null;
+  tension: string | null;
+  vitesse: string | null;
+  nature_travaux: string | null;
+  urgence: string | null;
+  semaine_entree: number | null;
+}
+interface TypeEquipement {
+  id: string;
+  name: string;
 }
 interface Passage {
   id: string;
   equipement_id: string;
   atelier_id: string;
-  technicien_id: string | null;
+  operateur_id: string | null;
   pourcentage: number;
   commentaire: string | null;
   photo_url: string | null;
   passage_date: string;
   ateliers: { name: string } | null;
-  techniciens: { full_name: string } | null;
+  operateurs: { full_name: string } | null;
 }
 
 // --- UTILITAIRES ---
@@ -57,66 +69,72 @@ const getProgressColor = (p: number) => {
   return "bg-green-500";
 };
 
+const EMPTY_FORM = {
+  code_faratec: "", client_name: "", type_equipement: "",
+  ndi_da_ns: "", mle_reference: "", marque: "",
+  puissance_kw: "", tension: "", vitesse: "",
+  operateur: "", urgence: "normal", nature_travaux: "",
+};
+
 export default function EquipementsPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [equipements, setEquipements] = useState<Equipement[]>([]);
   const [passages, setPassages] = useState<Passage[]>([]);
+  const [typesEquipement, setTypesEquipement] = useState<TypeEquipement[]>([]);
 
-  // --- UI ---
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterMode, setFilterMode] = useState<"all" | "en_cours" | "livres" | "stagnant">("all");
+  const [filterMode, setFilterMode] = useState<"all" | "en_cours" | "livres" | "stagnant" | "urgent">("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [zoomedPhoto, setZoomedPhoto] = useState<string | null>(null);
 
-  // --- MODALE CRÉATION ---
+  // --- CRÉATION ---
   const [creating, setCreating] = useState(false);
-  const [newForm, setNewForm] = useState({
-    reference: "", client_name: "", type_equipement: "",
-    marque: "", puissance_kw: "", operateur: "",
-  });
+  const [newForm, setNewForm] = useState({ ...EMPTY_FORM });
+  const [newCustomType, setNewCustomType] = useState("");
   const [newErrors, setNewErrors] = useState<Record<string, string>>({});
   const [newSaving, setNewSaving] = useState(false);
 
-  // --- MODALE ÉDITION ---
+  // --- ÉDITION ---
   const [editing, setEditing] = useState<Equipement | null>(null);
-  const [editForm, setEditForm] = useState({
-    reference: "", client_name: "", type_equipement: "",
-    marque: "", puissance_kw: "", operateur: "",
-  });
+  const [editForm, setEditForm] = useState({ ...EMPTY_FORM });
+  const [editCustomType, setEditCustomType] = useState("");
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
 
   // --- CHARGEMENT ---
   const load = async () => {
     setLoading(true);
-    const [eqRes, passRes] = await Promise.all([
+    const [eqRes, passRes, typesRes] = await Promise.all([
       supabase.from("equipements").select("*").is("deleted_at", null).order("created_at", { ascending: false }),
       supabase.from("journal_passages")
-        .select("id, equipement_id, atelier_id, technicien_id, pourcentage, commentaire, photo_url, passage_date, ateliers(name), techniciens(full_name)")
+        .select("id, equipement_id, atelier_id, operateur_id, pourcentage, commentaire, photo_url, passage_date, ateliers(name), operateurs(full_name)")
         .is("deleted_at", null)
         .order("passage_date", { ascending: false }),
+      supabase.from("types_equipement").select("id, name").order("name"),
     ]);
     setEquipements((eqRes.data as Equipement[]) || []);
     setPassages((passRes.data as unknown as Passage[]) || []);
+    setTypesEquipement((typesRes.data as TypeEquipement[]) || []);
     setLoading(false);
   };
 
   useEffect(() => { load(); }, []);
 
-  // Échap pour fermer les modales
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (creating) closeCreate();
-        if (editing) closeEdit();
+        if (zoomedPhoto) setZoomedPhoto(null);
+        else if (creating) closeCreate();
+        else if (editing) closeEdit();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [creating, editing]);
+  }, [creating, editing, zoomedPhoto]);
 
-  // --- MAP DERNIER PASSAGE ---
   const dernierPassageMap = useMemo(() => {
     const map = new Map<string, Passage>();
     passages.forEach((p) => {
@@ -125,7 +143,6 @@ export default function EquipementsPage() {
     return map;
   }, [passages]);
 
-  // --- MAP STAGNANT ---
   const stagnantIds = useMemo(() => {
     const set = new Set<string>();
     equipements.forEach((e) => {
@@ -137,33 +154,32 @@ export default function EquipementsPage() {
     return set;
   }, [equipements, passages]);
 
-  // --- STATS ---
   const stats = useMemo(() => {
     const total = equipements.length;
     const enCours = equipements.filter((e) => e.statut !== "livre").length;
     const livres = equipements.filter((e) => e.statut === "livre").length;
     const stagnants = stagnantIds.size;
-    return { total, enCours, livres, stagnants };
+    const urgents = equipements.filter((e) => e.urgence === "urgent" && e.statut !== "livre").length;
+    return { total, enCours, livres, stagnants, urgents };
   }, [equipements, stagnantIds]);
 
-  // --- FILTRAGE ---
   const filteredEquipements = useMemo(() => {
     let list = [...equipements];
 
     if (filterMode === "en_cours") list = list.filter((e) => e.statut !== "livre");
     else if (filterMode === "livres") list = list.filter((e) => e.statut === "livre");
     else if (filterMode === "stagnant") list = list.filter((e) => stagnantIds.has(e.id));
+    else if (filterMode === "urgent") list = list.filter((e) => e.urgence === "urgent" && e.statut !== "livre");
 
     if (searchTerm) {
       const s = searchTerm.toLowerCase();
       list = list.filter((e) =>
         e.client_name.toLowerCase().includes(s) ||
-        (e.reference && e.reference.toLowerCase().includes(s)) ||
+        (e.code_faratec && e.code_faratec.toLowerCase().includes(s)) ||
         e.type_equipement.toLowerCase().includes(s)
       );
     }
 
-    // Tri : non vus depuis longtemps en premier, puis livrés en bas
     list.sort((a, b) => {
       if (a.statut === "livre" && b.statut !== "livre") return 1;
       if (a.statut !== "livre" && b.statut === "livre") return -1;
@@ -175,39 +191,72 @@ export default function EquipementsPage() {
     return list;
   }, [equipements, filterMode, searchTerm, stagnantIds, dernierPassageMap]);
 
+  // --- GESTION DES TYPES ---
+  const handleCreateTypeIfNeeded = async (typeName: string): Promise<string> => {
+    if (!user || !typeName.trim()) return typeName.trim();
+    const existing = typesEquipement.find((t) => t.name.toLowerCase() === typeName.trim().toLowerCase());
+    if (existing) return existing.name;
+    const { data } = await supabase.from("types_equipement").insert({
+      name: typeName.trim(),
+      owner_id: user.id,
+    }).select().single();
+    if (data) {
+      setTypesEquipement((prev) => [...prev, data as TypeEquipement].sort((a, b) => a.name.localeCompare(b.name)));
+      return (data as TypeEquipement).name;
+    }
+    return typeName.trim();
+  };
+
   // --- CRÉATION ---
   const openCreate = () => {
     setCreating(true);
-    setNewForm({ reference: "", client_name: "", type_equipement: "", marque: "", puissance_kw: "", operateur: "" });
+    setNewForm({ ...EMPTY_FORM });
+    setNewCustomType("");
     setNewErrors({});
   };
-  const closeCreate = () => { setCreating(false); setNewErrors({}); };
+  const closeCreate = () => { setCreating(false); setNewErrors({}); setNewCustomType(""); };
 
   const handleCreate = async () => {
     if (!user) return;
     const errs: Record<string, string> = {};
-    if (!newForm.reference.trim()) errs.reference = "Obligatoire";
+    if (!newForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
     if (!newForm.client_name.trim()) errs.client_name = "Obligatoire";
-    if (!newForm.type_equipement.trim()) errs.type_equipement = "Obligatoire";
+    const finalType = newForm.type_equipement === "__autre__" ? newCustomType : newForm.type_equipement;
+    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
     setNewErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setNewSaving(true);
+    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
+
+    const d = new Date();
+    const dayNum = d.getDay() || 7;
+    d.setDate(d.getDate() + 4 - dayNum);
+    const yearStart = new Date(d.getFullYear(), 0, 1);
+    const semaine = Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+
     const { data, error } = await supabase.from("equipements").insert({
-      reference: newForm.reference.trim(),
+      code_faratec: newForm.code_faratec.trim(),
       client_name: newForm.client_name.trim(),
-      type_equipement: newForm.type_equipement.trim(),
+      type_equipement: typeFinalName,
+      ndi_da_ns: newForm.ndi_da_ns.trim() || null,
+      mle_reference: newForm.mle_reference.trim() || null,
       marque: newForm.marque.trim() || null,
       puissance_kw: newForm.puissance_kw ? parseFloat(newForm.puissance_kw) : null,
+      tension: newForm.tension.trim() || null,
+      vitesse: newForm.vitesse.trim() || null,
       operateur: newForm.operateur.trim() || null,
+      urgence: newForm.urgence || "normal",
+      nature_travaux: newForm.nature_travaux.trim() || null,
       owner_id: user.id,
       statut: "en_attente",
       pourcentage_global: 0,
+      semaine_entree: semaine,
     }).select().single();
 
     if (error || !data) {
       setNewSaving(false);
-      setNewErrors({ reference: "Erreur : cette référence existe peut-être déjà." });
+      setNewErrors({ code_faratec: "Erreur : ce code existe peut-être déjà." });
       return;
     }
     setEquipements((prev) => [data as Equipement, ...prev]);
@@ -218,46 +267,69 @@ export default function EquipementsPage() {
   // --- ÉDITION ---
   const openEdit = (eq: Equipement) => {
     setEditing(eq);
+    const isKnownType = typesEquipement.some((t) => t.name === eq.type_equipement);
     setEditForm({
-      reference: eq.reference || "",
+      code_faratec: eq.code_faratec || "",
       client_name: eq.client_name || "",
-      type_equipement: eq.type_equipement || "",
+      type_equipement: isKnownType ? eq.type_equipement : "__autre__",
+      ndi_da_ns: eq.ndi_da_ns || "",
+      mle_reference: eq.mle_reference || "",
       marque: eq.marque || "",
       puissance_kw: eq.puissance_kw ? String(eq.puissance_kw) : "",
+      tension: eq.tension || "",
+      vitesse: eq.vitesse || "",
       operateur: eq.operateur || "",
+      urgence: eq.urgence || "normal",
+      nature_travaux: eq.nature_travaux || "",
     });
+    setEditCustomType(isKnownType ? "" : (eq.type_equipement || ""));
     setEditErrors({});
   };
-  const closeEdit = () => { setEditing(null); setEditErrors({}); };
+  const closeEdit = () => { setEditing(null); setEditErrors({}); setEditCustomType(""); };
 
   const handleSaveEdit = async () => {
-    if (!editing) return;
+    if (!editing || !user) return;
     const errs: Record<string, string> = {};
-    if (!editForm.reference.trim()) errs.reference = "Obligatoire";
+    if (!editForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
     if (!editForm.client_name.trim()) errs.client_name = "Obligatoire";
-    if (!editForm.type_equipement.trim()) errs.type_equipement = "Obligatoire";
+    const finalType = editForm.type_equipement === "__autre__" ? editCustomType : editForm.type_equipement;
+    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
     setEditErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setEditSaving(true);
+    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
+
     const updated: Equipement = {
       ...editing,
-      reference: editForm.reference.trim(),
+      code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: editForm.type_equipement.trim(),
+      type_equipement: typeFinalName,
+      ndi_da_ns: editForm.ndi_da_ns.trim() || null,
+      mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
       puissance_kw: editForm.puissance_kw ? parseFloat(editForm.puissance_kw) : null,
+      tension: editForm.tension.trim() || null,
+      vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
+      urgence: editForm.urgence || "normal",
+      nature_travaux: editForm.nature_travaux.trim() || null,
     };
     setEquipements((prev) => prev.map((e) => (e.id === editing.id ? updated : e)));
 
     await supabase.from("equipements").update({
-      reference: editForm.reference.trim(),
+      code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: editForm.type_equipement.trim(),
+      type_equipement: typeFinalName,
+      ndi_da_ns: editForm.ndi_da_ns.trim() || null,
+      mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
       puissance_kw: editForm.puissance_kw ? parseFloat(editForm.puissance_kw) : null,
+      tension: editForm.tension.trim() || null,
+      vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
+      urgence: editForm.urgence || "normal",
+      nature_travaux: editForm.nature_travaux.trim() || null,
     }).eq("id", editing.id);
 
     setEditSaving(false);
@@ -266,6 +338,8 @@ export default function EquipementsPage() {
 
   // --- LIVRER ---
   const handleMarquerLivre = async (id: string) => {
+    const eq = equipements.find((e) => e.id === id);
+    if (!eq || eq.pourcentage_global < 100) return;
     const dateIso = new Date().toISOString().slice(0, 10);
     setEquipements((prev) =>
       prev.map((e) => (e.id === id ? { ...e, statut: "livre", date_livraison_reelle: dateIso } : e))
@@ -276,15 +350,171 @@ export default function EquipementsPage() {
     }).eq("id", id);
   };
 
-  // --- SUPPRIMER (soft delete) ---
   const handleDelete = async (id: string) => {
     setEquipements((prev) => prev.filter((e) => e.id !== id));
     setConfirmDelete(null);
     await supabase.from("equipements").update({ deleted_at: new Date().toISOString() }).eq("id", id);
   };
 
-  // --- HISTORIQUE ---
   const getHistorique = (eqId: string) => passages.filter((p) => p.equipement_id === eqId);
+
+  // --- RENDU FORMULAIRE ---
+  const renderFormFields = (
+    form: typeof EMPTY_FORM,
+    setForm: React.Dispatch<React.SetStateAction<typeof EMPTY_FORM>>,
+    customType: string,
+    setCustomType: React.Dispatch<React.SetStateAction<string>>,
+    errors: Record<string, string>
+  ) => (
+    <div className="space-y-5">
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Informations principales</h4>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Code Faratec *</label>
+            <input
+              value={form.code_faratec}
+              onChange={(e) => setForm((f) => ({ ...f, code_faratec: e.target.value }))}
+              placeholder="Ex: 12744"
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.code_faratec ? "border-red-400" : "border-slate-200"}`}
+            />
+            {errors.code_faratec && <p className="text-xs text-red-600 mt-1">{errors.code_faratec}</p>}
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
+            <input
+              value={form.client_name}
+              onChange={(e) => setForm((f) => ({ ...f, client_name: e.target.value }))}
+              placeholder="Nom du client"
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.client_name ? "border-red-400" : "border-slate-200"}`}
+            />
+            {errors.client_name && <p className="text-xs text-red-600 mt-1">{errors.client_name}</p>}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
+            <select
+              value={form.type_equipement}
+              onChange={(e) => { setForm((f) => ({ ...f, type_equipement: e.target.value })); setCustomType(""); }}
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.type_equipement ? "border-red-400" : "border-slate-200"}`}
+            >
+              <option value="">-- Sélectionner --</option>
+              {typesEquipement.map((t) => (
+                <option key={t.id} value={t.name}>{t.name}</option>
+              ))}
+              <option value="__autre__">+ Autre (saisir)</option>
+            </select>
+            {form.type_equipement === "__autre__" && (
+              <input
+                value={customType}
+                onChange={(e) => setCustomType(e.target.value)}
+                placeholder="Nouveau type d'équipement..."
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm mt-2 focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
+            )}
+            {errors.type_equipement && <p className="text-xs text-red-600 mt-1">{errors.type_equipement}</p>}
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Urgence</label>
+            <select
+              value={form.urgence}
+              onChange={(e) => setForm((f) => ({ ...f, urgence: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            >
+              <option value="normal">Normal</option>
+              <option value="urgent">🔴 Urgent</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Informations techniques</h4>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">NDI / DA / NS</label>
+            <input
+              value={form.ndi_da_ns}
+              onChange={(e) => setForm((f) => ({ ...f, ndi_da_ns: e.target.value }))}
+              placeholder="Non disponible"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">MLE / Référence</label>
+            <input
+              value={form.mle_reference}
+              onChange={(e) => setForm((f) => ({ ...f, mle_reference: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Marque</label>
+            <input
+              value={form.marque}
+              onChange={(e) => setForm((f) => ({ ...f, marque: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Puissance (kW)</label>
+            <input
+              type="number"
+              value={form.puissance_kw}
+              onChange={(e) => setForm((f) => ({ ...f, puissance_kw: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Tension</label>
+            <input
+              value={form.tension}
+              onChange={(e) => setForm((f) => ({ ...f, tension: e.target.value }))}
+              placeholder="Ex: 380V"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Vitesse</label>
+            <input
+              value={form.vitesse}
+              onChange={(e) => setForm((f) => ({ ...f, vitesse: e.target.value }))}
+              placeholder="Ex: 1500 tr/min"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Détails</h4>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
+            <input
+              value={form.operateur}
+              onChange={(e) => setForm((f) => ({ ...f, operateur: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Nature des travaux</label>
+            <input
+              value={form.nature_travaux}
+              onChange={(e) => setForm((f) => ({ ...f, nature_travaux: e.target.value }))}
+              placeholder="Optionnel (modifiable plus tard)"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div className="space-y-5">
@@ -303,7 +533,7 @@ export default function EquipementsPage() {
       </div>
 
       {/* --- KPIs --- */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
         <button
           onClick={() => setFilterMode("all")}
           className={`text-left bg-white rounded-xl p-3 shadow-sm border-l-4 border-slate-400 hover:shadow-md transition ${filterMode === "all" ? "ring-2 ring-amber-400" : ""}`}
@@ -317,6 +547,15 @@ export default function EquipementsPage() {
         >
           <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">En cours</p>
           <p className="text-xl font-bold text-slate-800">{stats.enCours}</p>
+        </button>
+        <button
+          onClick={() => setFilterMode("urgent")}
+          className={`text-left bg-white rounded-xl p-3 shadow-sm border-l-4 border-red-600 hover:shadow-md transition ${filterMode === "urgent" ? "ring-2 ring-amber-400" : ""}`}
+        >
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+            <Zap size={10} className="text-red-500" /> Urgents
+          </p>
+          <p className="text-xl font-bold text-slate-800">{stats.urgents}</p>
         </button>
         <button
           onClick={() => setFilterMode("livres")}
@@ -340,7 +579,7 @@ export default function EquipementsPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
           <input
             type="text"
-            placeholder="Rechercher par référence, client ou type..."
+            placeholder="Rechercher par code faratec, client ou type..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
@@ -350,7 +589,12 @@ export default function EquipementsPage() {
           <div className="mt-2 flex items-center gap-2">
             <Filter size={12} className="text-slate-400" />
             <span className="text-xs text-slate-500">
-              Filtre actif : <strong>{filterMode === "en_cours" ? "En cours" : filterMode === "livres" ? "Livrés" : "Stagnants"}</strong>
+              Filtre actif : <strong>{
+                filterMode === "en_cours" ? "En cours"
+                : filterMode === "livres" ? "Livrés"
+                : filterMode === "urgent" ? "Urgents"
+                : "Stagnants"
+              }</strong>
             </span>
             <button onClick={() => setFilterMode("all")} className="text-xs text-amber-600 hover:underline font-semibold">
               Réinitialiser
@@ -386,14 +630,21 @@ export default function EquipementsPage() {
               const isStagnant = stagnantIds.has(e.id);
               const isNew = historique.length === 0;
               const isLivre = e.statut === "livre";
+              const canLivrer = e.pourcentage_global >= 100;
+              const isUrgent = e.urgence === "urgent";
 
               return (
-                <div key={e.id} className={`transition ${isLivre ? "bg-slate-50/40" : "hover:bg-slate-50/40"}`}>
+                <div key={e.id} className={`transition ${isLivre ? "bg-slate-50/40" : isUrgent ? "bg-red-50/30" : "hover:bg-slate-50/40"}`}>
                   <div className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        {isUrgent && !isLivre && (
+                          <span className="text-[10px] bg-red-600 text-white px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                            <Zap size={9} /> URGENT
+                          </span>
+                        )}
                         <span className="font-bold text-slate-800 text-base">
-                          {e.reference || "Sans référence"}
+                          {e.code_faratec || "Sans code"}
                         </span>
                         {isLivre && (
                           <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-bold">
@@ -402,8 +653,7 @@ export default function EquipementsPage() {
                         )}
                         {isStagnant && !isLivre && (
                           <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1">
-                            <AlertTriangle size={9} /> STAGNANT
-                          </span>
+                            <AlertTriangle size={9} /> STAGNANT                          </span>
                         )}
                         {isNew && !isLivre && (
                           <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-bold">
@@ -414,9 +664,15 @@ export default function EquipementsPage() {
                       <p className="text-sm text-slate-600 mt-0.5">{e.client_name}</p>
                       <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5 flex-wrap">
                         <span>{e.type_equipement}</span>
+                        {e.mle_reference && <><span className="text-slate-300">•</span><span>MLE: {e.mle_reference}</span></>}
                         {e.marque && <><span className="text-slate-300">•</span><span>{e.marque}</span></>}
                         {e.puissance_kw && <><span className="text-slate-300">•</span><span>{e.puissance_kw} kW</span></>}
+                        {e.tension && <><span className="text-slate-300">•</span><span>{e.tension}</span></>}
+                        {e.vitesse && <><span className="text-slate-300">•</span><span>{e.vitesse}</span></>}
                       </div>
+                      {e.ndi_da_ns && (
+                        <p className="text-[10px] text-slate-400 mt-0.5">NDI/DA/NS: {e.ndi_da_ns}</p>
+                      )}
                       {dernierPassage && !isLivre && (
                         <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
                           <Clock size={10} />
@@ -428,6 +684,9 @@ export default function EquipementsPage() {
                           <CheckCircle2 size={10} />
                           Livré le {formatDate(e.date_livraison_reelle)}
                         </p>
+                      )}
+                      {!isLivre && e.semaine_entree && (
+                        <p className="text-[10px] text-slate-400 mt-0.5">Entrée semaine {e.semaine_entree}</p>
                       )}
                     </div>
 
@@ -444,15 +703,25 @@ export default function EquipementsPage() {
                     </div>
 
                     <div className="flex items-center gap-1">
-                      {!isLivre && (
-                        <button
-                          onClick={() => handleMarquerLivre(e.id)}
-                          className="flex items-center gap-1 text-violet-700 hover:bg-violet-50 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition"
-                          title="Marquer comme livré"
-                        >
-                          <Truck size={14} />
-                        </button>
-                      )}
+                      <button
+                        onClick={() => navigate(`/couts?eq=${e.id}`)}
+                        className="text-emerald-700 hover:bg-emerald-50 rounded-lg px-2 py-1.5 text-xs font-medium transition"
+                        title="Calcul des coûts"
+                      >
+                        <Calculator size={14} />
+                      </button>
+                      <button
+                        onClick={() => canLivrer && handleMarquerLivre(e.id)}
+                        disabled={!canLivrer}
+                        className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition ${
+                          canLivrer
+                            ? "text-violet-700 hover:bg-violet-50"
+                            : "text-slate-300 cursor-not-allowed"
+                        }`}
+                        title={canLivrer ? "Marquer comme livré" : `Impossible : équipement à ${e.pourcentage_global}% (100% requis)`}
+                      >
+                        <Truck size={14} />
+                      </button>
                       <button
                         onClick={() => openEdit(e)}
                         className="flex items-center gap-1 text-blue-700 hover:bg-blue-50 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition"
@@ -502,12 +771,21 @@ export default function EquipementsPage() {
                           {historique.map((p) => (
                             <div key={p.id} className="bg-white rounded-lg border border-slate-200 p-3 flex gap-3 hover:shadow-sm transition">
                               {p.photo_url && (
-                                <img src={p.photo_url} alt="" className="w-16 h-16 object-cover rounded-lg shrink-0" />
+                                <button
+                                  onClick={() => setZoomedPhoto(p.photo_url)}
+                                  className="relative group shrink-0"
+                                  title="Cliquer pour agrandir"
+                                >
+                                  <img src={p.photo_url} alt="" className="w-16 h-16 object-cover rounded-lg" />
+                                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 rounded-lg flex items-center justify-center transition">
+                                    <ZoomIn size={16} className="text-white opacity-0 group-hover:opacity-100 transition" />
+                                  </div>
+                                </button>
                               )}
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center justify-between">
                                   <span className="text-xs font-semibold text-slate-700">
-                                    {p.ateliers?.name} {p.techniciens?.full_name ? `• ${p.techniciens.full_name}` : ""}
+                                    {p.ateliers?.name} {p.operateurs?.full_name ? `• ${p.operateurs.full_name}` : ""}
                                   </span>
                                   <span className="text-xs font-bold text-amber-700">{p.pourcentage}%</span>
                                 </div>
@@ -533,7 +811,7 @@ export default function EquipementsPage() {
       {creating && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeCreate} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
               <div>
                 <h3 className="font-bold text-slate-800 flex items-center gap-2">
@@ -546,68 +824,8 @@ export default function EquipementsPage() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Référence *</label>
-                  <input
-                    value={newForm.reference}
-                    onChange={(e) => { setNewForm((f) => ({ ...f, reference: e.target.value })); setNewErrors((p) => ({ ...p, reference: "" })); }}
-                    placeholder="Ex: REF-2025-001"
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${newErrors.reference ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {newErrors.reference && <p className="text-xs text-red-600 mt-1">{newErrors.reference}</p>}
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
-                  <input
-                    value={newForm.client_name}
-                    onChange={(e) => { setNewForm((f) => ({ ...f, client_name: e.target.value })); setNewErrors((p) => ({ ...p, client_name: "" })); }}
-                    placeholder="Nom du client"
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${newErrors.client_name ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {newErrors.client_name && <p className="text-xs text-red-600 mt-1">{newErrors.client_name}</p>}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
-                <input
-                  value={newForm.type_equipement}
-                  onChange={(e) => { setNewForm((f) => ({ ...f, type_equipement: e.target.value })); setNewErrors((p) => ({ ...p, type_equipement: "" })); }}
-                  placeholder="Ex: Moteur électrique"
-                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${newErrors.type_equipement ? "border-red-400" : "border-slate-200"}`}
-                />
-                {newErrors.type_equipement && <p className="text-xs text-red-600 mt-1">{newErrors.type_equipement}</p>}
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Marque</label>
-                  <input
-                    value={newForm.marque}
-                    onChange={(e) => setNewForm((f) => ({ ...f, marque: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Puissance (kW)</label>
-                  <input
-                    type="number"
-                    value={newForm.puissance_kw}
-                    onChange={(e) => setNewForm((f) => ({ ...f, puissance_kw: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
-                  <input
-                    value={newForm.operateur}
-                    onChange={(e) => setNewForm((f) => ({ ...f, operateur: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                  />
-                </div>
-              </div>
+            <div className="p-5">
+              {renderFormFields(newForm, setNewForm, newCustomType, setNewCustomType, newErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">
@@ -630,7 +848,7 @@ export default function EquipementsPage() {
       {editing && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeEdit} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
               <div>
                 <h3 className="font-bold text-slate-800 flex items-center gap-2">
@@ -643,65 +861,8 @@ export default function EquipementsPage() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Référence *</label>
-                  <input
-                    value={editForm.reference}
-                    onChange={(e) => { setEditForm((f) => ({ ...f, reference: e.target.value })); setEditErrors((p) => ({ ...p, reference: "" })); }}
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none ${editErrors.reference ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {editErrors.reference && <p className="text-xs text-red-600 mt-1">{editErrors.reference}</p>}
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
-                  <input
-                    value={editForm.client_name}
-                    onChange={(e) => { setEditForm((f) => ({ ...f, client_name: e.target.value })); setEditErrors((p) => ({ ...p, client_name: "" })); }}
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none ${editErrors.client_name ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {editErrors.client_name && <p className="text-xs text-red-600 mt-1">{editErrors.client_name}</p>}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
-                <input
-                  value={editForm.type_equipement}
-                  onChange={(e) => { setEditForm((f) => ({ ...f, type_equipement: e.target.value })); setEditErrors((p) => ({ ...p, type_equipement: "" })); }}
-                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none ${editErrors.type_equipement ? "border-red-400" : "border-slate-200"}`}
-                />
-                {editErrors.type_equipement && <p className="text-xs text-red-600 mt-1">{editErrors.type_equipement}</p>}
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Marque</label>
-                  <input
-                    value={editForm.marque}
-                    onChange={(e) => setEditForm((f) => ({ ...f, marque: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Puissance (kW)</label>
-                  <input
-                    type="number"
-                    value={editForm.puissance_kw}
-                    onChange={(e) => setEditForm((f) => ({ ...f, puissance_kw: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
-                  <input
-                    value={editForm.operateur}
-                    onChange={(e) => setEditForm((f) => ({ ...f, operateur: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-              </div>
+            <div className="p-5">
+              {renderFormFields(editForm, setEditForm, editCustomType, setEditCustomType, editErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">
@@ -717,6 +878,27 @@ export default function EquipementsPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* --- MODALE PHOTO ZOOM --- */}
+      {zoomedPhoto && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm cursor-zoom-out"
+          onClick={() => setZoomedPhoto(null)}
+        >
+          <button
+            onClick={() => setZoomedPhoto(null)}
+            className="absolute top-4 right-4 text-white hover:text-amber-400 transition p-2 bg-black/50 rounded-full"
+          >
+            <X size={24} />
+          </button>
+          <img
+            src={zoomedPhoto}
+            alt="Photo agrandie"
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
         </div>
       )}
     </div>

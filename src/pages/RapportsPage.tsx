@@ -7,26 +7,28 @@ import {
 } from "lucide-react";
 import { buildRapportPdf, buildCsv } from "../lib/reportPdf";
 
+// --- TYPES ---
 interface Equipement {
   id: string;
   client_name: string;
   type_equipement: string;
-  reference: string | null;
+  code_faratec: string | null;
   statut: string;
   date_entree: string;
   pourcentage_global: number;
   created_at: string;
+  semaine_entree: number | null;
 }
 interface Passage {
   id: string;
   equipement_id: string;
   atelier_id: string;
-  technicien_id: string | null;
+  operateur_id: string | null;
   pourcentage: number;
   passage_date: string;
 }
 interface Atelier { id: string; name: string; }
-interface Technicien { id: string; full_name: string; }
+interface Operateur { id: string; full_name: string; }
 
 type PeriodType = "jour" | "semaine" | "mois" | "annee" | "custom";
 
@@ -34,7 +36,7 @@ export default function RapportsPage() {
   const [equipements, setEquipements] = useState<Equipement[]>([]);
   const [passages, setPassages] = useState<Passage[]>([]);
   const [ateliers, setAteliers] = useState<Atelier[]>([]);
-  const [techniciens, setTechniciens] = useState<Technicien[]>([]);
+  const [operateurs, setOperateurs] = useState<Operateur[]>([]);
   const [loading, setLoading] = useState(true);
   const [period, setPeriod] = useState<PeriodType>("jour");
   const [downloading, setDownloading] = useState(false);
@@ -46,16 +48,16 @@ export default function RapportsPage() {
 
   useEffect(() => {
     const load = async () => {
-      const [{ data: eqData }, { data: passData }, { data: atData }, { data: techData }] = await Promise.all([
+      const [eqRes, passRes, atRes, opRes] = await Promise.all([
         supabase.from("equipements").select("*").is("deleted_at", null),
         supabase.from("journal_passages").select("*").is("deleted_at", null).order("passage_date", { ascending: true }),
         supabase.from("ateliers").select("id, name"),
-        supabase.from("techniciens").select("id, full_name"),
+        supabase.from("operateurs").select("id, full_name"),
       ]);
-      setEquipements((eqData as Equipement[]) || []);
-      setPassages((passData as Passage[]) || []);
-      setAteliers((atData as Atelier[]) || []);
-      setTechniciens((techData as Technicien[]) || []);
+      setEquipements((eqRes.data as Equipement[]) || []);
+      setPassages((passRes.data as Passage[]) || []);
+      setAteliers((atRes.data as Atelier[]) || []);
+      setOperateurs((opRes.data as Operateur[]) || []);
       setLoading(false);
     };
     load();
@@ -158,7 +160,7 @@ export default function RapportsPage() {
     return arr;
   }, [passages, now]);
 
-  // Charge par atelier - fusion des doublons par nom pour eviter les warnings React
+  // Charge par atelier - fusion des doublons par nom
   const chargeParAtelier = useMemo(() => {
     const map = new Map<string, { id: string; name: string; count: number }>();
     ateliers.forEach((a) => {
@@ -173,13 +175,13 @@ export default function RapportsPage() {
     return Array.from(map.values()).sort((a, b) => b.count - a.count);
   }, [ateliers, passagesInPeriod]);
 
-  const chargeParTechnicien = useMemo(() => {
-    return techniciens.map((t) => ({
+  const chargeParOperateur = useMemo(() => {
+    return operateurs.map((t) => ({
       id: t.id,
       name: t.full_name,
-      count: passagesInPeriod.filter((p) => p.technicien_id === t.id).length,
+      count: passagesInPeriod.filter((p) => p.operateur_id === t.id).length,
     })).filter((t) => t.count > 0).sort((a, b) => b.count - a.count);
-  }, [techniciens, passagesInPeriod]);
+  }, [operateurs, passagesInPeriod]);
 
   const topClients = useMemo(() => {
     const map: Record<string, number> = {};
@@ -249,7 +251,7 @@ export default function RapportsPage() {
     ? Math.round(progressionParEquipement.reduce((s, p) => s + (p.fin - p.debut), 0) / progressionParEquipement.length)
     : 0;
 
-  // --- SECTIONS POUR LE PDF ---
+  // --- SECTIONS PDF ---
   const buildSections = (): { heading: string; rows: [string, string][] }[] => [
     {
       heading: "Synthese de la periode",
@@ -268,21 +270,21 @@ export default function RapportsPage() {
       rows: [["Atelier", "Passages"] as [string, string], ...chargeParAtelier.map((a) => [a.name, String(a.count)] as [string, string])],
     },
     {
-      heading: "Charge par technicien",
-      rows: [["Technicien", "Passages"] as [string, string], ...chargeParTechnicien.map((t) => [t.name, String(t.count)] as [string, string])],
+      heading: "Charge par operateur",
+      rows: [["Operateur", "Passages"] as [string, string], ...chargeParOperateur.map((t) => [t.name, String(t.count)] as [string, string])],
     },
     {
       heading: "Equipements stagnants",
       rows: [
         ["Equipement", "Jours stagnants"] as [string, string],
-        ...equipementsStagnants.map((e) => [`${e.reference || "-"} - ${e.client_name}`, `${e.daysStagnant}j`] as [string, string]),
+        ...equipementsStagnants.map((e) => [`${e.code_faratec || "-"} - ${e.client_name}`, `${e.daysStagnant}j`] as [string, string]),
       ],
     },
     {
       heading: "Progression par equipement",
       rows: [
         ["Equipement", "Debut -> Fin"] as [string, string],
-        ...progressionParEquipement.map((p) => [`${p.equipement?.reference || "-"} - ${p.equipement?.client_name}`, `${p.debut}% -> ${p.fin}% (${p.nbTournees})`] as [string, string]),
+        ...progressionParEquipement.map((p) => [`${p.equipement?.code_faratec || "-"} - ${p.equipement?.client_name}`, `${p.debut}% -> ${p.fin}% (${p.nbTournees})`] as [string, string]),
       ],
     },
     {
@@ -295,7 +297,6 @@ export default function RapportsPage() {
     },
   ];
 
-  // --- PDF ---
   const handleDownloadPdf = async () => {
     setDownloading(true);
     try {
@@ -327,7 +328,6 @@ export default function RapportsPage() {
     }
   };
 
-  // --- CSV ---
   const handleExportCsv = () => {
     const rows: string[][] = [
       ["FARATEC - Rapport"],
@@ -513,7 +513,7 @@ export default function RapportsPage() {
             </div>
           </div>
 
-          {/* --- CHARGE PAR ATELIER + TECHNICIEN --- */}
+          {/* --- CHARGE PAR ATELIER + OPÉRATEUR --- */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="bg-white rounded-xl p-5 shadow-sm">
               <div className="flex items-center gap-2 mb-4">
@@ -544,14 +544,14 @@ export default function RapportsPage() {
             <div className="bg-white rounded-xl p-5 shadow-sm">
               <div className="flex items-center gap-2 mb-4">
                 <Users size={16} className="text-amber-600" />
-                <h2 className="font-semibold text-slate-700 text-sm">Charge par technicien</h2>
+                <h2 className="font-semibold text-slate-700 text-sm">Charge par operateur</h2>
               </div>
-              {chargeParTechnicien.length === 0 ? (
+              {chargeParOperateur.length === 0 ? (
                 <p className="text-sm text-slate-400">Aucun passage sur la periode.</p>
               ) : (
                 <div className="space-y-2">
-                  {chargeParTechnicien.map((t) => {
-                    const max = Math.max(...chargeParTechnicien.map((x) => x.count), 1);
+                  {chargeParOperateur.map((t) => {
+                    const max = Math.max(...chargeParOperateur.map((x) => x.count), 1);
                     return (
                       <div key={t.id} className="space-y-1">
                         <div className="flex items-center justify-between text-sm">
@@ -590,7 +590,7 @@ export default function RapportsPage() {
                   return (
                     <div key={p.equipement!.id} className="py-2 flex items-center justify-between text-sm">
                       <span className="text-slate-800">
-                        {p.equipement!.reference || "-"} - {p.equipement!.client_name}
+                        {p.equipement!.code_faratec || "-"} - {p.equipement!.client_name}
                       </span>
                       <span className="flex items-center gap-2">
                         <span className="text-slate-500">{p.debut}%</span>
@@ -620,7 +620,7 @@ export default function RapportsPage() {
               <div className="divide-y divide-slate-100">
                 {equipementsStagnants.map((e) => (
                   <div key={e.id} className="py-2 flex items-center justify-between text-sm">
-                    <span className="text-slate-800">{e.reference || "-"} - {e.client_name}</span>
+                    <span className="text-slate-800">{e.code_faratec || "-"} - {e.client_name}</span>
                     <div className="flex items-center gap-2">
                       <span className="font-semibold text-amber-700">{e.pourcentage_global}%</span>
                       <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1">

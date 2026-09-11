@@ -1,10 +1,13 @@
+import { useNavigate } from "react-router-dom";
 import { useEffect, useState, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { useAuth } from "../context/AuthContext";
 import {
   Camera, X, Play, Square, Search, ChevronDown, ChevronUp,
   History, CheckCircle2, Clock, Package, Truck, Edit3, AlertTriangle,
-  Filter, Loader2, Info, Plus, Sparkles
+  Filter, Loader2, Plus, Sparkles, ZoomIn, Wrench, Zap, PlusCircle,
+  Hourglass, PlayCircle, Flag, Timer, CalendarClock, StopCircle, User,
+  Calculator,
 } from "lucide-react";
 
 // --- TYPES ---
@@ -12,29 +15,53 @@ interface Equipement {
   id: string;
   client_name: string;
   type_equipement: string;
-  reference: string | null;
+  code_faratec: string | null;
   marque: string | null;
   puissance_kw: number | null;
   operateur: string | null;
   pourcentage_global: number;
   statut: string;
   date_livraison_reelle: string | null;
+  semaine_entree: number | null;
+  urgence: string | null;
+  ndi_da_ns: string | null;
+  mle_reference: string | null;
+  tension: string | null;
+  vitesse: string | null;
+  nature_travaux: string | null;
+  created_at: string;
+  date_debut_intervention: string | null;
+  date_fin_intervention: string | null;
 }
 interface Atelier { id: string; name: string; }
-interface Technicien { id: string; full_name: string; }
+interface Operateur { id: string; full_name: string; }
+interface TypeTravail { id: string; name: string; code: string | null; }
+interface TypeEquipement { id: string; name: string; }
 interface Tournee { id: string; started_at: string; ended_at: string | null; }
 interface Passage {
   id: string;
   equipement_id: string;
   atelier_id: string;
-  technicien_id: string | null;
+  operateur_id: string | null;
+  type_travail_id: string | null;
   pourcentage: number;
   commentaire: string | null;
   photo_url: string | null;
   passage_date: string;
   tournee_id: string | null;
   ateliers: { name: string } | null;
-  techniciens: { full_name: string } | null;
+  operateurs: { full_name: string } | null;
+  types_travaux: { name: string; code: string | null } | null;
+}
+interface SessionOperateur {
+  id: string;
+  equipement_id: string;
+  operateur_id: string;
+  atelier_id: string | null;
+  started_at: string;
+  ended_at: string | null;
+  operateurs: { full_name: string } | null;
+  ateliers: { name: string } | null;
 }
 
 // --- UTILITAIRES ---
@@ -54,95 +81,152 @@ const getTimeAgo = (iso: string | null) => {
   return `Il y a ${Math.floor(days / 30)}mois`;
 };
 
+const getDaysBetween = (from: string, to: string | null): number => {
+  const endDate = to ? new Date(to) : new Date();
+  const startDate = new Date(from);
+  return Math.max(0, Math.floor((endDate.getTime() - startDate.getTime()) / 86400000));
+};
+
+const formatDuree = (startIso: string, endIso: string | null): string => {
+  const start = new Date(startIso).getTime();
+  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  const diffMs = Math.max(0, end - start);
+  const totalMin = Math.floor(diffMs / 60000);
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  if (hours === 0) return `${mins}min`;
+  if (hours > 24) {
+    const days = Math.floor(hours / 24);
+    const remainingHours = hours % 24;
+    return `${days}j ${remainingHours}h`;
+  }
+  return `${hours}h${mins.toString().padStart(2, "0")}`;
+};
+
 const getProgressColor = (p: number) => {
   if (p < 30) return "bg-red-500";
   if (p < 70) return "bg-amber-500";
   return "bg-green-500";
 };
 
+const getWeekNumber = (date: Date): number => {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+};
+
+type StatutKey = "en_attente" | "en_cours" | "termine" | "livre";
+
+const getStatutInfo = (statut: string, pourcentage: number): { key: StatutKey; label: string; color: string; icon: any } => {
+  if (statut === "livre") return { key: "livre", label: "LIVRÉ", color: "bg-slate-600 text-white", icon: CheckCircle2 };
+  if (pourcentage >= 100) return { key: "termine", label: "TERMINÉ", color: "bg-green-600 text-white", icon: Flag };
+  if (pourcentage > 0) return { key: "en_cours", label: "EN COURS", color: "bg-blue-600 text-white", icon: PlayCircle };
+  return { key: "en_attente", label: "EN ATTENTE", color: "bg-amber-500 text-white", icon: Hourglass };
+};
+
+const EMPTY_NEW_EQ = {
+  code_faratec: "", client_name: "", type_equipement: "",
+  ndi_da_ns: "", mle_reference: "", marque: "",
+  puissance_kw: "", tension: "", vitesse: "",
+  operateur: "", urgence: "normal", nature_travaux: "",
+};
+
 export default function JournalPage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingIntervention, setSavingIntervention] = useState(false);
+  const [stoppingSession, setStoppingSession] = useState<string | null>(null);
 
   const [equipements, setEquipements] = useState<Equipement[]>([]);
   const [ateliers, setAteliers] = useState<Atelier[]>([]);
-  const [techniciens, setTechniciens] = useState<Technicien[]>([]);
+  const [operateurs, setOperateurs] = useState<Operateur[]>([]);
+  const [typesTravaux, setTypesTravaux] = useState<TypeTravail[]>([]);
+  const [typesEquipement, setTypesEquipement] = useState<TypeEquipement[]>([]);
   const [passages, setPassages] = useState<Passage[]>([]);
+  const [sessions, setSessions] = useState<SessionOperateur[]>([]);
   const [tourneeActive, setTourneeActive] = useState<Tournee | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterMode, setFilterMode] = useState<"all" | "not_seen_today" | "stagnant">("all");
+  const [filterMode, setFilterMode] = useState<"all" | "en_attente" | "en_cours" | "termine" | "not_seen_today" | "stagnant">("all");
   const [showLivre, setShowLivre] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
-  // --- OBSERVATION ---
   const [selectedEquipement, setSelectedEquipement] = useState<Equipement | null>(null);
   const [atelierId, setAtelierId] = useState("");
-  const [technicienId, setTechnicienId] = useState("");
+  const [operateurId, setOperateurId] = useState("");
+  const [typeTravailId, setTypeTravailId] = useState("");
   const [pourcentage, setPourcentage] = useState("");
   const [commentaire, setCommentaire] = useState("");
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  // --- ÉDITION ---
   const [editingEquipement, setEditingEquipement] = useState<Equipement | null>(null);
-  const [editForm, setEditForm] = useState({
-    reference: "", client_name: "", type_equipement: "",
-    marque: "", puissance_kw: "", operateur: "",
-  });
+  const [editForm, setEditForm] = useState({ ...EMPTY_NEW_EQ });
+  const [editCustomType, setEditCustomType] = useState("");
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
 
-  // --- CRÉATION ---
   const [creatingEquipement, setCreatingEquipement] = useState(false);
-  const [newEqForm, setNewEqForm] = useState({
-    reference: "", client_name: "", type_equipement: "",
-    marque: "", puissance_kw: "", operateur: "",
-  });
+  const [newEqForm, setNewEqForm] = useState({ ...EMPTY_NEW_EQ });
+  const [newCustomType, setNewCustomType] = useState("");
   const [newEqErrors, setNewEqErrors] = useState<Record<string, string>>({});
   const [newEqSaving, setNewEqSaving] = useState(false);
+
+  const [zoomedPhoto, setZoomedPhoto] = useState<string | null>(null);
 
   // --- CHARGEMENT ---
   const load = async () => {
     setLoading(true);
-    const [eqRes, atRes, techRes, passRes, tourneeRes] = await Promise.all([
+    const [eqRes, atRes, opRes, ttRes, teRes, passRes, tourneeRes, sessRes] = await Promise.all([
       supabase.from("equipements").select("*").is("deleted_at", null).order("created_at", { ascending: false }),
       supabase.from("ateliers").select("id, name").order("name"),
-      supabase.from("techniciens").select("id, full_name").eq("is_active", true).order("full_name"),
+      supabase.from("operateurs").select("id, full_name").eq("is_active", true).order("full_name"),
+      supabase.from("types_travaux").select("id, name, code").order("name"),
+      supabase.from("types_equipement").select("id, name").order("name"),
       supabase.from("journal_passages")
-        .select("*, ateliers(name), techniciens(full_name)")
+        .select("*, ateliers(name), operateurs(full_name), types_travaux(name, code)")
         .is("deleted_at", null)
         .order("passage_date", { ascending: false })
         .limit(200),
       supabase.from("tournees").select("*").is("ended_at", null).order("started_at", { ascending: false }).limit(1),
+      supabase.from("interventions_operateurs")
+        .select("*, operateurs(full_name), ateliers(name)")
+        .order("started_at", { ascending: false })
+        .limit(500),
     ]);
 
     setEquipements((eqRes.data as Equipement[]) || []);
     setAteliers((atRes.data as Atelier[]) || []);
-    setTechniciens((techRes.data as Technicien[]) || []);
+    setOperateurs((opRes.data as Operateur[]) || []);
+    setTypesTravaux((ttRes.data as TypeTravail[]) || []);
+    setTypesEquipement((teRes.data as TypeEquipement[]) || []);
     setPassages((passRes.data as unknown as Passage[]) || []);
+    setSessions((sessRes.data as unknown as SessionOperateur[]) || []);
     setTourneeActive(tourneeRes.data && tourneeRes.data.length > 0 ? (tourneeRes.data[0] as Tournee) : null);
     setLoading(false);
   };
 
   useEffect(() => { load(); }, []);
 
-  // --- RACCOURCI CLAVIER ÉCHAP ---
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (selectedEquipement) closeObservation();
-        if (editingEquipement) closeEdit();
-        if (creatingEquipement) closeCreate();
+        if (zoomedPhoto) setZoomedPhoto(null);
+        else if (selectedEquipement) closeObservation();
+        else if (editingEquipement) closeEdit();
+        else if (creatingEquipement) closeCreate();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedEquipement, editingEquipement, creatingEquipement]);
+  }, [selectedEquipement, editingEquipement, creatingEquipement, zoomedPhoto]);
 
-  // --- STATISTIQUES DE TOURNÉE ---
+  // --- STATS ---
   const statsTournee = useMemo(() => {
     if (!tourneeActive) return { count: 0, avgPct: 0, ateliersVisites: 0 };
     const passagesTournee = passages.filter((p) => p.tournee_id === tourneeActive.id);
@@ -153,7 +237,6 @@ export default function JournalPage() {
     return { count: passagesTournee.length, avgPct, ateliersVisites: ateliersSet.size };
   }, [tourneeActive, passages]);
 
-  // --- MAP DERNIER PASSAGE ---
   const dernierPassageMap = useMemo(() => {
     const map = new Map<string, Passage>();
     passages.forEach((p) => {
@@ -162,11 +245,39 @@ export default function JournalPage() {
     return map;
   }, [passages]);
 
-  // --- FILTRAGE INTELLIGENT ---
+  const sessionsActivesParEquipement = useMemo(() => {
+    const map = new Map<string, SessionOperateur[]>();
+    sessions.filter((s) => !s.ended_at).forEach((s) => {
+      if (!map.has(s.equipement_id)) map.set(s.equipement_id, []);
+      map.get(s.equipement_id)!.push(s);
+    });
+    return map;
+  }, [sessions]);
+
+  const sessionsParEquipement = useMemo(() => {
+    const map = new Map<string, SessionOperateur[]>();
+    sessions.forEach((s) => {
+      if (!map.has(s.equipement_id)) map.set(s.equipement_id, []);
+      map.get(s.equipement_id)!.push(s);
+    });
+    return map;
+  }, [sessions]);
+
+  const statsStatuts = useMemo(() => {
+    const enCoursList = equipements.filter((e) => e.statut !== "livre");
+    const enAttente = enCoursList.filter((e) => e.pourcentage_global === 0).length;
+    const enCours = enCoursList.filter((e) => e.pourcentage_global > 0 && e.pourcentage_global < 100).length;
+    const termine = enCoursList.filter((e) => e.pourcentage_global >= 100).length;
+    return { enAttente, enCours, termine };
+  }, [equipements]);
+
   const filteredEquipements = useMemo(() => {
     let list = equipements.filter((e) => e.statut !== "livre");
 
-    if (filterMode === "not_seen_today") {
+    if (filterMode === "en_attente") list = list.filter((e) => e.pourcentage_global === 0);
+    else if (filterMode === "en_cours") list = list.filter((e) => e.pourcentage_global > 0 && e.pourcentage_global < 100);
+    else if (filterMode === "termine") list = list.filter((e) => e.pourcentage_global >= 100);
+    else if (filterMode === "not_seen_today") {
       const todayStr = new Date().toISOString().slice(0, 10);
       const seenTodayIds = new Set(
         passages.filter((p) => p.passage_date.slice(0, 10) === todayStr).map((p) => p.equipement_id)
@@ -183,7 +294,7 @@ export default function JournalPage() {
       const s = searchTerm.toLowerCase();
       list = list.filter((e) =>
         e.client_name.toLowerCase().includes(s) ||
-        (e.reference && e.reference.toLowerCase().includes(s)) ||
+        (e.code_faratec && e.code_faratec.toLowerCase().includes(s)) ||
         e.type_equipement.toLowerCase().includes(s)
       );
     }
@@ -203,7 +314,7 @@ export default function JournalPage() {
       const s = searchTerm.toLowerCase();
       list = list.filter((e) =>
         e.client_name.toLowerCase().includes(s) ||
-        (e.reference && e.reference.toLowerCase().includes(s))
+        (e.code_faratec && e.code_faratec.toLowerCase().includes(s))
       );
     }
     return list;
@@ -222,55 +333,78 @@ export default function JournalPage() {
     setTourneeActive(null);
   };
 
-  // --- CRÉATION D'ÉQUIPEMENT ---
+  // --- CRÉATION ---
   const openCreate = () => {
     setCreatingEquipement(true);
-    setNewEqForm({ reference: "", client_name: "", type_equipement: "", marque: "", puissance_kw: "", operateur: "" });
+    setNewEqForm({ ...EMPTY_NEW_EQ });
+    setNewCustomType("");
     setNewEqErrors({});
   };
 
   const closeCreate = () => {
     setCreatingEquipement(false);
     setNewEqErrors({});
+    setNewCustomType("");
+  };
+
+  const handleCreateTypeIfNeeded = async (typeName: string): Promise<string> => {
+    if (!user || !typeName.trim()) return typeName.trim();
+    const existing = typesEquipement.find((t) => t.name.toLowerCase() === typeName.trim().toLowerCase());
+    if (existing) return existing.name;
+    const { data } = await supabase.from("types_equipement").insert({
+      name: typeName.trim(),
+      owner_id: user.id,
+    }).select().single();
+    if (data) {
+      setTypesEquipement((prev) => [...prev, data as TypeEquipement].sort((a, b) => a.name.localeCompare(b.name)));
+      return (data as TypeEquipement).name;
+    }
+    return typeName.trim();
   };
 
   const handleCreateEquipement = async () => {
     if (!user) return;
     const errs: Record<string, string> = {};
-    if (!newEqForm.reference.trim()) errs.reference = "Obligatoire";
+    if (!newEqForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
     if (!newEqForm.client_name.trim()) errs.client_name = "Obligatoire";
-    if (!newEqForm.type_equipement.trim()) errs.type_equipement = "Obligatoire";
+    const finalType = newEqForm.type_equipement === "__autre__" ? newCustomType : newEqForm.type_equipement;
+    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
     setNewEqErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setNewEqSaving(true);
+    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
+    const semaine = getWeekNumber(new Date());
 
     const { data, error } = await supabase.from("equipements").insert({
-      reference: newEqForm.reference.trim(),
+      code_faratec: newEqForm.code_faratec.trim(),
       client_name: newEqForm.client_name.trim(),
-      type_equipement: newEqForm.type_equipement.trim(),
+      type_equipement: typeFinalName,
+      ndi_da_ns: newEqForm.ndi_da_ns.trim() || null,
+      mle_reference: newEqForm.mle_reference.trim() || null,
       marque: newEqForm.marque.trim() || null,
       puissance_kw: newEqForm.puissance_kw ? parseFloat(newEqForm.puissance_kw) : null,
+      tension: newEqForm.tension.trim() || null,
+      vitesse: newEqForm.vitesse.trim() || null,
       operateur: newEqForm.operateur.trim() || null,
+      urgence: newEqForm.urgence || "normal",
+      nature_travaux: newEqForm.nature_travaux.trim() || null,
       owner_id: user.id,
       statut: "en_attente",
       pourcentage_global: 0,
+      semaine_entree: semaine,
     }).select().single();
 
     if (error || !data) {
       setNewEqSaving(false);
-      setNewEqErrors({ reference: "Erreur lors de la création. Vérifiez la référence (peut-être déjà utilisée)." });
+      setNewEqErrors({ code_faratec: "Erreur : ce code existe peut-être déjà." });
       return;
     }
 
     const newEquipement = data as Equipement;
-
-    // Mise à jour optimiste de la liste locale
     setEquipements((prev) => [newEquipement, ...prev]);
     setNewEqSaving(false);
     closeCreate();
-
-    // Ouvre immédiatement la modale d'observation sur ce nouvel équipement
     openObservation(newEquipement);
   };
 
@@ -279,7 +413,8 @@ export default function JournalPage() {
     setSelectedEquipement(eq);
     setPourcentage(String(eq.pourcentage_global));
     setAtelierId("");
-    setTechnicienId("");
+    setOperateurId("");
+    setTypeTravailId("");
     setCommentaire("");
     setPhotoFile(null);
     setPhotoPreview(null);
@@ -299,6 +434,40 @@ export default function JournalPage() {
     setPhotoPreview(URL.createObjectURL(file));
   };
 
+  const demarrerSessionSiNecessaire = async (
+    equipementId: string,
+    opId: string,
+    atId: string
+  ): Promise<void> => {
+    if (!user || !opId) return;
+    const existing = sessions.find(
+      (s) => s.equipement_id === equipementId && s.operateur_id === opId && !s.ended_at
+    );
+    if (existing) return;
+
+    const { data } = await supabase.from("interventions_operateurs").insert({
+      equipement_id: equipementId,
+      operateur_id: opId,
+      atelier_id: atId || null,
+      owner_id: user.id,
+    }).select("*, operateurs(full_name), ateliers(name)").single();
+
+    if (data) {
+      setSessions((prev) => [data as unknown as SessionOperateur, ...prev]);
+    }
+  };
+
+  const handleStopSession = async (sessionId: string) => {
+    if (stoppingSession) return;
+    setStoppingSession(sessionId);
+    const now = new Date().toISOString();
+    setSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, ended_at: now } : s))
+    );
+    await supabase.from("interventions_operateurs").update({ ended_at: now }).eq("id", sessionId);
+    setStoppingSession(null);
+  };
+
   const handleSaveObservation = async () => {
     if (!user || !selectedEquipement) return;
     const errs: Record<string, string> = {};
@@ -309,6 +478,12 @@ export default function JournalPage() {
 
     setSaving(true);
     const newPct = Number(pourcentage);
+    const now = new Date().toISOString();
+
+    const isFirstPassage = !selectedEquipement.date_debut_intervention;
+    const dateDebutIntervention = isFirstPassage ? now : selectedEquipement.date_debut_intervention;
+
+    const nouveauStatut = newPct >= 100 ? "termine" : "en_reparation";
 
     let photoUrl: string | null = null;
     if (photoFile) {
@@ -324,21 +499,23 @@ export default function JournalPage() {
       id: `temp-${Date.now()}`,
       equipement_id: selectedEquipement.id,
       atelier_id: atelierId,
-      technicien_id: technicienId || null,
+      operateur_id: operateurId || null,
+      type_travail_id: typeTravailId || null,
       pourcentage: newPct,
       commentaire: commentaire.trim() || null,
       photo_url: photoUrl,
-      passage_date: new Date().toISOString(),
+      passage_date: now,
       tournee_id: tourneeActive?.id || null,
       ateliers: { name: ateliers.find((a) => a.id === atelierId)?.name || "" },
-      techniciens: technicienId ? { full_name: techniciens.find((t) => t.id === technicienId)?.full_name || "" } : null,
+      operateurs: operateurId ? { full_name: operateurs.find((o) => o.id === operateurId)?.full_name || "" } : null,
+      types_travaux: typeTravailId ? { name: typesTravaux.find((t) => t.id === typeTravailId)?.name || "", code: typesTravaux.find((t) => t.id === typeTravailId)?.code || null } : null,
     };
 
     setPassages((prev) => [optimisticPassage, ...prev]);
     setEquipements((prev) =>
       prev.map((e) =>
         e.id === selectedEquipement.id
-          ? { ...e, pourcentage_global: newPct, statut: newPct >= 100 ? "termine" : "en_reparation" }
+          ? { ...e, pourcentage_global: newPct, statut: nouveauStatut, date_debut_intervention: dateDebutIntervention }
           : e
       )
     );
@@ -347,23 +524,43 @@ export default function JournalPage() {
       owner_id: user.id,
       equipement_id: selectedEquipement.id,
       atelier_id: atelierId,
-      technicien_id: technicienId || null,
+      operateur_id: operateurId || null,
+      type_travail_id: typeTravailId || null,
       pourcentage: newPct,
       commentaire: commentaire.trim() || null,
       photo_url: photoUrl,
       tournee_id: tourneeActive?.id || null,
     });
 
-    await supabase.from("equipements").update({
+    const updateData: Record<string, any> = {
       pourcentage_global: newPct,
-      statut: newPct >= 100 ? "termine" : "en_reparation",
-    }).eq("id", selectedEquipement.id);
+      statut: nouveauStatut,
+    };
+    if (isFirstPassage) updateData.date_debut_intervention = dateDebutIntervention;
+    await supabase.from("equipements").update(updateData).eq("id", selectedEquipement.id);
+
+    if (operateurId) {
+      await demarrerSessionSiNecessaire(selectedEquipement.id, operateurId, atelierId);
+    }
 
     setSaving(false);
     closeObservation();
   };
 
+  const handleTerminerIntervention = async (id: string) => {
+    if (savingIntervention) return;
+    setSavingIntervention(true);
+    const now = new Date().toISOString();
+    setEquipements((prev) =>
+      prev.map((e) => (e.id === id ? { ...e, date_fin_intervention: now } : e))
+    );
+    await supabase.from("equipements").update({ date_fin_intervention: now }).eq("id", id);
+    setSavingIntervention(false);
+  };
+
   const handleMarquerLivre = async (id: string) => {
+    const eq = equipements.find((e) => e.id === id);
+    if (!eq || eq.pourcentage_global < 100) return;
     setEquipements((prev) =>
       prev.map((e) =>
         e.id === id ? { ...e, statut: "livre", date_livraison_reelle: new Date().toISOString().slice(0, 10) } : e
@@ -378,52 +575,75 @@ export default function JournalPage() {
   // --- ÉDITION ---
   const openEdit = (eq: Equipement) => {
     setEditingEquipement(eq);
+    const isKnownType = typesEquipement.some((t) => t.name === eq.type_equipement);
     setEditForm({
-      reference: eq.reference || "",
+      code_faratec: eq.code_faratec || "",
       client_name: eq.client_name || "",
-      type_equipement: eq.type_equipement || "",
+      type_equipement: isKnownType ? eq.type_equipement : "__autre__",
+      ndi_da_ns: eq.ndi_da_ns || "",
+      mle_reference: eq.mle_reference || "",
       marque: eq.marque || "",
       puissance_kw: eq.puissance_kw ? String(eq.puissance_kw) : "",
+      tension: eq.tension || "",
+      vitesse: eq.vitesse || "",
       operateur: eq.operateur || "",
+      urgence: eq.urgence || "normal",
+      nature_travaux: eq.nature_travaux || "",
     });
+    setEditCustomType(isKnownType ? "" : (eq.type_equipement || ""));
     setEditErrors({});
   };
 
   const closeEdit = () => {
     setEditingEquipement(null);
     setEditErrors({});
+    setEditCustomType("");
   };
 
   const handleSaveEdit = async () => {
-    if (!editingEquipement) return;
+    if (!editingEquipement || !user) return;
     const errs: Record<string, string> = {};
-    if (!editForm.reference.trim()) errs.reference = "La référence est obligatoire.";
-    if (!editForm.client_name.trim()) errs.client_name = "Le nom du client est obligatoire.";
-    if (!editForm.type_equipement.trim()) errs.type_equipement = "Le type est obligatoire.";
+    if (!editForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
+    if (!editForm.client_name.trim()) errs.client_name = "Obligatoire";
+    const finalType = editForm.type_equipement === "__autre__" ? editCustomType : editForm.type_equipement;
+    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
     setEditErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setEditSaving(true);
+    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
 
     const updated: Equipement = {
       ...editingEquipement,
-      reference: editForm.reference.trim(),
+      code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: editForm.type_equipement.trim(),
+      type_equipement: typeFinalName,
+      ndi_da_ns: editForm.ndi_da_ns.trim() || null,
+      mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
       puissance_kw: editForm.puissance_kw ? parseFloat(editForm.puissance_kw) : null,
+      tension: editForm.tension.trim() || null,
+      vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
+      urgence: editForm.urgence || "normal",
+      nature_travaux: editForm.nature_travaux.trim() || null,
     };
 
     setEquipements((prev) => prev.map((e) => (e.id === editingEquipement.id ? updated : e)));
 
     await supabase.from("equipements").update({
-      reference: editForm.reference.trim(),
+      code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: editForm.type_equipement.trim(),
+      type_equipement: typeFinalName,
+      ndi_da_ns: editForm.ndi_da_ns.trim() || null,
+      mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
       puissance_kw: editForm.puissance_kw ? parseFloat(editForm.puissance_kw) : null,
+      tension: editForm.tension.trim() || null,
+      vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
+      urgence: editForm.urgence || "normal",
+      nature_travaux: editForm.nature_travaux.trim() || null,
     }).eq("id", editingEquipement.id);
 
     setEditSaving(false);
@@ -433,126 +653,325 @@ export default function JournalPage() {
   const getHistorique = (equipementId: string) =>
     passages.filter((p) => p.equipement_id === equipementId);
 
+  const getTempsParOperateur = (equipementId: string) => {
+    const eqSessions = sessionsParEquipement.get(equipementId) || [];
+    const map = new Map<string, { operateur: string; totalMs: number; sessions: SessionOperateur[] }>();
+    eqSessions.forEach((s) => {
+      const end = s.ended_at ? new Date(s.ended_at).getTime() : Date.now();
+      const start = new Date(s.started_at).getTime();
+      const diff = Math.max(0, end - start);
+      const key = s.operateur_id;
+      const name = s.operateurs?.full_name || "Inconnu";
+      if (!map.has(key)) map.set(key, { operateur: name, totalMs: 0, sessions: [] });
+      const entry = map.get(key)!;
+      entry.totalMs += diff;
+      entry.sessions.push(s);
+    });
+    return Array.from(map.values()).sort((a, b) => b.totalMs - a.totalMs);
+  };
+
+  const formatDureeMs = (ms: number): string => {
+    const totalMin = Math.floor(ms / 60000);
+    const hours = Math.floor(totalMin / 60);
+    const mins = totalMin % 60;
+    if (hours === 0) return `${mins}min`;
+    if (hours > 24) {
+      const days = Math.floor(hours / 24);
+      const remainingHours = hours % 24;
+      return `${days}j ${remainingHours}h`;
+    }
+    return `${hours}h${mins.toString().padStart(2, "0")}`;
+  };
+
+  const semaineActuelle = getWeekNumber(new Date());
+
+  const renderFormFields = (
+    form: typeof EMPTY_NEW_EQ,
+    setForm: React.Dispatch<React.SetStateAction<typeof EMPTY_NEW_EQ>>,
+    customType: string,
+    setCustomType: React.Dispatch<React.SetStateAction<string>>,
+    errs: Record<string, string>
+  ) => (
+    <div className="space-y-5">
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Informations principales</h4>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Code Faratec *</label>
+            <input
+              value={form.code_faratec}
+              onChange={(e) => setForm((f) => ({ ...f, code_faratec: e.target.value }))}
+              placeholder="Ex: 12744"
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errs.code_faratec ? "border-red-400" : "border-slate-200"}`}
+            />
+            {errs.code_faratec && <p className="text-xs text-red-600 mt-1">{errs.code_faratec}</p>}
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
+            <input
+              value={form.client_name}
+              onChange={(e) => setForm((f) => ({ ...f, client_name: e.target.value }))}
+              placeholder="Nom du client"
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errs.client_name ? "border-red-400" : "border-slate-200"}`}
+            />
+            {errs.client_name && <p className="text-xs text-red-600 mt-1">{errs.client_name}</p>}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
+            <select
+              value={form.type_equipement}
+              onChange={(e) => { setForm((f) => ({ ...f, type_equipement: e.target.value })); setCustomType(""); }}
+              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errs.type_equipement ? "border-red-400" : "border-slate-200"}`}
+            >
+              <option value="">-- Sélectionner --</option>
+              {typesEquipement.map((t) => (
+                <option key={t.id} value={t.name}>{t.name}</option>
+              ))}
+              <option value="__autre__">+ Autre (saisir)</option>
+            </select>
+            {form.type_equipement === "__autre__" && (
+              <input
+                value={customType}
+                onChange={(e) => setCustomType(e.target.value)}
+                placeholder="Nouveau type d'équipement..."
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm mt-2 focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              />
+            )}
+            {errs.type_equipement && <p className="text-xs text-red-600 mt-1">{errs.type_equipement}</p>}
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Urgence</label>
+            <select
+              value={form.urgence}
+              onChange={(e) => setForm((f) => ({ ...f, urgence: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            >
+              <option value="normal">Normal</option>
+              <option value="urgent">🔴 Urgent</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Informations techniques</h4>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">NDI / DA / NS</label>
+            <input
+              value={form.ndi_da_ns}
+              onChange={(e) => setForm((f) => ({ ...f, ndi_da_ns: e.target.value }))}
+              placeholder="Non disponible"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">MLE / Référence</label>
+            <input
+              value={form.mle_reference}
+              onChange={(e) => setForm((f) => ({ ...f, mle_reference: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Marque</label>
+            <input
+              value={form.marque}
+              onChange={(e) => setForm((f) => ({ ...f, marque: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Puissance (kW)</label>
+            <input
+              type="number"
+              value={form.puissance_kw}
+              onChange={(e) => setForm((f) => ({ ...f, puissance_kw: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Tension</label>
+            <input
+              value={form.tension}
+              onChange={(e) => setForm((f) => ({ ...f, tension: e.target.value }))}
+              placeholder="Ex: 380V"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Vitesse</label>
+            <input
+              value={form.vitesse}
+              onChange={(e) => setForm((f) => ({ ...f, vitesse: e.target.value }))}
+              placeholder="Ex: 1500 tr/min"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Détails</h4>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
+            <input
+              value={form.operateur}
+              onChange={(e) => setForm((f) => ({ ...f, operateur: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Nature des travaux</label>
+            <input
+              value={form.nature_travaux}
+              onChange={(e) => setForm((f) => ({ ...f, nature_travaux: e.target.value }))}
+              placeholder="Optionnel (modifiable plus tard)"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="space-y-5">
       {/* --- EN-TÊTE --- */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-slate-800">Journal / Tournée</h1>
-          <p className="text-sm text-slate-500">Suivi intelligent des passages en atelier.</p>
+          <p className="text-sm text-slate-500">
+            Suivi intelligent des passages en atelier. <span className="text-amber-600 font-semibold">Semaine {semaineActuelle}</span>
+          </p>
         </div>
-        <div className="flex items-center gap-2">
-          {/* Bouton Nouvel équipement */}
-          <button
-            onClick={openCreate}
-            className="flex items-center gap-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-xl px-4 py-2.5 text-sm font-semibold shadow-sm transition"
-          >
-            <Plus size={16} /> Nouvel équipement
-          </button>
-
-          {tourneeActive ? (
-            <div className="flex items-center gap-3 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-xl px-4 py-2.5 shadow-sm">
-              <span className="relative flex h-3 w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
-              </span>
-              <div className="text-xs">
-                <p className="font-bold text-green-800">Tournée en cours</p>
-                <p className="text-green-600">
-                  Depuis {formatTime(tourneeActive.started_at)} · {statsTournee.count} passages
-                </p>
-              </div>
-              <button
-                onClick={handleEndTournee}
-                className="ml-2 flex items-center gap-1 bg-white hover:bg-red-50 text-red-600 border border-red-200 rounded-lg px-3 py-1.5 text-xs font-semibold transition"
-              >
-                <Square size={12} /> Terminer
-              </button>
+        {tourneeActive ? (
+          <div className="flex items-center gap-3 bg-gradient-to-r from-green-50 to-emerald-50 border border-green-200 rounded-xl px-4 py-2.5 shadow-sm">
+            <span className="relative flex h-3 w-3">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
+            </span>
+            <div className="text-xs">
+              <p className="font-bold text-green-800">Tournée en cours</p>
+              <p className="text-green-600">
+                Depuis {formatTime(tourneeActive.started_at)} · {statsTournee.count} passages
+              </p>
             </div>
-          ) : (
             <button
-              onClick={handleStartTournee}
-              className="flex items-center gap-2 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white rounded-xl px-5 py-2.5 text-sm font-semibold shadow-md hover:shadow-lg transition-all"
+              onClick={handleEndTournee}
+              className="ml-2 flex items-center gap-1 bg-white hover:bg-red-50 text-red-600 border border-red-200 rounded-lg px-3 py-1.5 text-xs font-semibold transition"
             >
-              <Play size={16} /> Démarrer la tournée
+              <Square size={12} /> Terminer
             </button>
-          )}
+          </div>
+        ) : (
+          <button
+            onClick={handleStartTournee}
+            className="flex items-center gap-2 bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white rounded-xl px-5 py-2.5 text-sm font-semibold shadow-md hover:shadow-lg transition-all"
+          >
+            <Play size={16} /> Démarrer la tournée
+          </button>
+        )}
+      </div>
+
+      {/* --- KPIs statuts --- */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-amber-500">
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+            <Hourglass size={10} /> En attente
+          </p>
+          <p className="text-xl font-bold text-slate-800">{statsStatuts.enAttente}</p>
+        </div>
+        <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-blue-500">
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+            <PlayCircle size={10} /> En cours
+          </p>
+          <p className="text-xl font-bold text-slate-800">{statsStatuts.enCours}</p>
+        </div>
+        <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-green-500">
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+            <Flag size={10} /> Terminés
+          </p>
+          <p className="text-xl font-bold text-slate-800">{statsStatuts.termine}</p>
+        </div>
+        <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-slate-600">
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+            <CheckCircle2 size={10} /> Livrés
+          </p>
+          <p className="text-xl font-bold text-slate-800">{equipementsLivres.length}</p>
         </div>
       </div>
 
-      {/* --- KPIs DE TOURNÉE --- */}
+      {/* --- KPIs de tournée --- */}
       {tourneeActive && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-amber-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Passages</p>
-            <p className="text-xl font-bold text-slate-800">{statsTournee.count}</p>
+          <div className="bg-gradient-to-br from-amber-50 to-amber-100 rounded-xl p-3 shadow-sm border border-amber-200">
+            <p className="text-[10px] uppercase tracking-wider text-amber-700 font-semibold">Passages</p>
+            <p className="text-xl font-bold text-amber-900">{statsTournee.count}</p>
           </div>
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-blue-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Ateliers visités</p>
-            <p className="text-xl font-bold text-slate-800">{statsTournee.ateliersVisites}/{ateliers.length}</p>
+          <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-xl p-3 shadow-sm border border-blue-200">
+            <p className="text-[10px] uppercase tracking-wider text-blue-700 font-semibold">Ateliers visités</p>
+            <p className="text-xl font-bold text-blue-900">{statsTournee.ateliersVisites}/{ateliers.length}</p>
           </div>
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-violet-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">% moyen</p>
-            <p className="text-xl font-bold text-slate-800">{statsTournee.avgPct}%</p>
+          <div className="bg-gradient-to-br from-violet-50 to-violet-100 rounded-xl p-3 shadow-sm border border-violet-200">
+            <p className="text-[10px] uppercase tracking-wider text-violet-700 font-semibold">% moyen</p>
+            <p className="text-xl font-bold text-violet-900">{statsTournee.avgPct}%</p>
           </div>
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-green-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Durée</p>
-            <p className="text-xl font-bold text-slate-800">
+          <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-xl p-3 shadow-sm border border-green-200">
+            <p className="text-[10px] uppercase tracking-wider text-green-700 font-semibold">Durée</p>
+            <p className="text-xl font-bold text-green-900">
               {Math.floor((Date.now() - new Date(tourneeActive.started_at).getTime()) / 3600000)}h
             </p>
           </div>
         </div>
       )}
 
-      {/* --- BARRE DE RECHERCHE + FILTRES --- */}
-      <div className="bg-white rounded-xl p-4 shadow-sm space-y-3">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
-          <input
-            type="text"
-            placeholder="Rechercher par client, référence ou type..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
-          />
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => setFilterMode("all")}
-            className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${
-              filterMode === "all" ? "bg-amber-500 text-neutral-900" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-            }`}
-          >
-            <Filter size={12} /> Tous ({equipements.filter((e) => e.statut !== "livre").length})
-          </button>
-          <button
-            onClick={() => setFilterMode("not_seen_today")}
-            className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${
-              filterMode === "not_seen_today" ? "bg-amber-500 text-neutral-900" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-            }`}
-          >
-            <Clock size={12} /> Non vus aujourd'hui
-          </button>
-          <button
-            onClick={() => setFilterMode("stagnant")}
-            className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${
-              filterMode === "stagnant" ? "bg-amber-500 text-neutral-900" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-            }`}
-          >
-            <AlertTriangle size={12} /> Stagnants
-          </button>
-        </div>
-      </div>
-
-      {/* --- LISTE PRINCIPALE --- */}
+      {/* --- BLOC UNIFIÉ --- */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+        <div className="p-4 border-b border-slate-100 space-y-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+            <input
+              type="text"
+              placeholder="Rechercher par code faratec, client ou type..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+            />
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => setFilterMode("all")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "all" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <Filter size={12} /> Tous ({equipements.filter((e) => e.statut !== "livre").length})
+            </button>
+            <button onClick={() => setFilterMode("en_attente")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "en_attente" ? "bg-amber-500 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <Hourglass size={12} /> En attente ({statsStatuts.enAttente})
+            </button>
+            <button onClick={() => setFilterMode("en_cours")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "en_cours" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <PlayCircle size={12} /> En cours ({statsStatuts.enCours})
+            </button>
+            <button onClick={() => setFilterMode("termine")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "termine" ? "bg-green-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <Flag size={12} /> Terminés ({statsStatuts.termine})
+            </button>
+            <button onClick={() => setFilterMode("not_seen_today")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "not_seen_today" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <Clock size={12} /> Non vus aujourd'hui
+            </button>
+            <button onClick={() => setFilterMode("stagnant")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "stagnant" ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <AlertTriangle size={12} /> Stagnants
+            </button>
+          </div>
+        </div>
+
         <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
           <h2 className="font-semibold text-slate-700 text-sm flex items-center gap-2">
             <Package size={16} className="text-amber-600" />
-            Équipements en attente
-            <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-bold">
-              {filteredEquipements.length}
-            </span>
+            Équipements ({filteredEquipements.length})
           </h2>
         </div>
 
@@ -564,12 +983,6 @@ export default function JournalPage() {
           <div className="text-center py-12">
             <Package size={32} className="mx-auto text-slate-300 mb-2" />
             <p className="text-sm text-slate-400">Aucun équipement trouvé.</p>
-            <button
-              onClick={openCreate}
-              className="mt-3 inline-flex items-center gap-1 text-amber-600 hover:text-amber-700 text-xs font-semibold"
-            >
-              <Plus size={12} /> Créer le premier équipement
-            </button>
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
@@ -580,14 +993,40 @@ export default function JournalPage() {
               const history3 = historique.slice(0, 3);
               const isStagnant = history3.length >= 3 && history3.every((p) => p.pourcentage === history3[0].pourcentage);
               const isNew = historique.length === 0;
+              const canLivrer = e.pourcentage_global >= 100;
+              const isUrgent = e.urgence === "urgent";
+              const statutInfo = getStatutInfo(e.statut, e.pourcentage_global);
+              const StatutIcon = statutInfo.icon;
+
+              const joursEnAtelier = getDaysBetween(e.created_at, null);
+              const delaiAvantReparation = e.date_debut_intervention ? getDaysBetween(e.created_at, e.date_debut_intervention) : null;
+              const dureeIntervention = e.date_debut_intervention ? getDaysBetween(e.date_debut_intervention, e.date_fin_intervention) : null;
+              const dureeTotale = getDaysBetween(e.created_at, e.date_fin_intervention);
+
+              const canTerminerIntervention = e.pourcentage_global >= 100 && !e.date_fin_intervention;
+              const sessionsActives = sessionsActivesParEquipement.get(e.id) || [];
+              const tempsParOperateur = getTempsParOperateur(e.id);
 
               return (
-                <div key={e.id} className="hover:bg-slate-50/40 transition">
+                <div key={e.id} className={`transition ${isUrgent ? "bg-red-50/30" : "hover:bg-slate-50/40"}`}>
                   <div className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1 ${statutInfo.color}`}>
+                          <StatutIcon size={9} /> {statutInfo.label}
+                        </span>
+                        {isUrgent && (
+                          <span className="text-[10px] bg-red-600 text-white px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                            <Zap size={9} /> URGENT
+                          </span>
+                        )}
+                        {sessionsActives.length > 0 && (
+                          <span className="text-[10px] bg-emerald-600 text-white px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
+                            <User size={9} /> {sessionsActives.length} EN COURS
+                          </span>
+                        )}
                         <span className="font-bold text-slate-800 text-sm">
-                          {e.reference || "Sans réf."}
+                          {e.code_faratec || "Sans code"}
                         </span>
                         <span className="text-sm text-slate-600">• {e.client_name}</span>
                         {isStagnant && (
@@ -595,18 +1034,50 @@ export default function JournalPage() {
                             <AlertTriangle size={9} /> STAGNANT
                           </span>
                         )}
-                        {isNew && (
-                          <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-bold">
-                            NOUVEAU
+                      </div>
+                      <p className="text-xs text-slate-500 mt-0.5">{e.type_equipement}</p>
+                      <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-1 flex-wrap">
+                        <span className="flex items-center gap-1">
+                          <Timer size={10} />
+                          En atelier depuis <strong className="text-slate-600">{joursEnAtelier}j</strong>
+                        </span>
+                        {e.date_debut_intervention && (
+                          <span className="flex items-center gap-1">
+                            <CalendarClock size={10} />
+                            Démarré le {formatDate(e.date_debut_intervention)}
+                          </span>
+                        )}
+                        {dernierPassage && (
+                          <span className="flex items-center gap-1">
+                            <Clock size={10} />
+                            Dernier passage : {getTimeAgo(dernierPassage.passage_date)} · {dernierPassage.ateliers?.name}
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-slate-500 mt-0.5">{e.type_equipement}</p>
-                      {dernierPassage && (
-                        <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
-                          <Clock size={10} />
-                          Dernier passage : {getTimeAgo(dernierPassage.passage_date)} · {dernierPassage.ateliers?.name}
-                        </p>
+                      {sessionsActives.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {sessionsActives.map((s) => (
+                            <div key={s.id} className="flex items-center gap-2 bg-emerald-50 border border-emerald-200 rounded-lg px-2 py-1">
+                              <span className="text-[10px] font-bold text-emerald-800">
+                                {s.operateurs?.full_name}
+                              </span>
+                              <span className="text-[10px] text-emerald-600 font-mono">
+                                {formatDuree(s.started_at, s.ended_at)}
+                              </span>
+                              <button
+                                onClick={() => handleStopSession(s.id)}
+                                disabled={stoppingSession === s.id}
+                                className="text-[10px] bg-red-100 hover:bg-red-200 text-red-700 rounded px-1.5 py-0.5 font-bold transition disabled:opacity-50"
+                                title="Arrêter la session"
+                              >
+                                {stoppingSession === s.id ? "..." : "STOP"}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {isNew && (
+                        <p className="text-[10px] text-slate-400 mt-0.5 italic">Aucun passage enregistré — cliquez sur Observation pour démarrer</p>
                       )}
                     </div>
 
@@ -630,16 +1101,36 @@ export default function JournalPage() {
                         <Edit3 size={12} /> Observation
                       </button>
                       <button
+                        onClick={() => navigate(`/couts?eq=${e.id}`)}
+                        className="flex items-center gap-1 text-emerald-700 hover:bg-emerald-50 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition"
+                        title="Calcul des coûts"
+                      >
+                        <Calculator size={12} />
+                      </button>
+                      {canTerminerIntervention && (
+                        <button
+                          onClick={() => handleTerminerIntervention(e.id)}
+                          disabled={savingIntervention}
+                          className="flex items-center gap-1 bg-orange-600 hover:bg-orange-700 text-white rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition disabled:opacity-50"
+                          title="Terminer l'intervention"
+                        >
+                          <StopCircle size={12} /> Terminer
+                        </button>
+                      )}
+                      <button
                         onClick={() => openEdit(e)}
                         className="flex items-center gap-1 text-blue-700 hover:bg-blue-50 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition"
-                        title="Modifier les informations"
+                        title="Modifier"
                       >
                         <Edit3 size={12} />
                       </button>
                       <button
-                        onClick={() => handleMarquerLivre(e.id)}
-                        className="flex items-center gap-1 text-violet-700 hover:bg-violet-50 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition"
-                        title="Marquer comme livré"
+                        onClick={() => canLivrer && handleMarquerLivre(e.id)}
+                        disabled={!canLivrer}
+                        className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition ${
+                          canLivrer ? "text-violet-700 hover:bg-violet-50" : "text-slate-300 cursor-not-allowed"
+                        }`}
+                        title={canLivrer ? "Marquer comme livré" : `Impossible : l'équipement est à ${e.pourcentage_global}% (100% requis)`}
                       >
                         <Truck size={12} />
                       </button>
@@ -653,42 +1144,158 @@ export default function JournalPage() {
                   </div>
 
                   {isExpanded && (
-                    <div className="bg-slate-50/60 border-t border-slate-100 p-4">
-                      <p className="text-xs font-semibold text-slate-600 mb-3 flex items-center gap-1">
-                        <History size={12} /> Historique ({historique.length} passages)
-                      </p>
-                      {historique.length === 0 ? (
-                        <p className="text-xs text-slate-400 italic">Aucun passage enregistré.</p>
-                      ) : (
-                        <div className="space-y-2">
-                          {historique.map((p) => (
-                            <div key={p.id} className="bg-white rounded-lg border border-slate-200 p-3 flex gap-3 hover:shadow-sm transition">
-                              {p.photo_url && (
-                                <img src={p.photo_url} alt="" className="w-16 h-16 object-cover rounded-lg shrink-0" />
-                              )}
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-xs font-semibold text-slate-700">
-                                    {p.ateliers?.name} {p.techniciens?.full_name ? `• ${p.techniciens.full_name}` : ""}
-                                  </span>
-                                  <span className="text-xs font-bold text-amber-700">{p.pourcentage}%</span>
+                    <div className="bg-slate-50/60 border-t border-slate-100 p-4 space-y-4">
+                      <div className="grid grid-cols-3 gap-2">
+                        <div className="bg-white rounded-lg border border-slate-200 p-3">
+                          <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold mb-1 flex items-center gap-1">
+                            <Hourglass size={10} /> Délai avant réparation
+                          </p>
+                          <p className="text-lg font-bold text-slate-800">
+                            {delaiAvantReparation !== null ? `${delaiAvantReparation}j` : "—"}
+                          </p>
+                          <p className="text-[9px] text-slate-400 mt-0.5">Entrée → Début</p>
+                        </div>
+                        <div className="bg-white rounded-lg border border-slate-200 p-3">
+                          <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold mb-1 flex items-center gap-1">
+                            <Wrench size={10} /> Durée d'intervention
+                          </p>
+                          <p className="text-lg font-bold text-blue-700">
+                            {dureeIntervention !== null ? `${dureeIntervention}j` : "—"}
+                          </p>
+                          <p className="text-[9px] text-slate-400 mt-0.5">
+                            {e.date_fin_intervention ? "Début → Fin" : "Début → Aujourd'hui"}
+                          </p>
+                        </div>
+                        <div className="bg-white rounded-lg border border-slate-200 p-3">
+                          <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold mb-1 flex items-center gap-1">
+                            <Package size={10} /> Durée totale
+                          </p>
+                          <p className="text-lg font-bold text-amber-700">{dureeTotale}j</p>
+                          <p className="text-[9px] text-slate-400 mt-0.5">Entrée → Aujourd'hui</p>
+                        </div>
+                      </div>
+
+                      {tempsParOperateur.length > 0 && (
+                        <div>
+                          <p className="text-xs font-semibold text-slate-600 mb-3 flex items-center gap-1">
+                            <User size={12} /> Temps passé par opérateur
+                          </p>
+                          <div className="space-y-2">
+                            {tempsParOperateur.map((tp, i) => {
+                              const activeSessions = tp.sessions.filter((s) => !s.ended_at);
+                              return (
+                                <div key={i} className="bg-white rounded-lg border border-slate-200 p-3">
+                                  <div className="flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                      <div className="w-7 h-7 rounded-full bg-amber-100 text-amber-800 flex items-center justify-center text-xs font-bold">
+                                        {tp.operateur.substring(0, 2).toUpperCase()}
+                                      </div>
+                                      <span className="text-sm font-medium text-slate-800">{tp.operateur}</span>
+                                      {activeSessions.length > 0 && (
+                                        <span className="text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-bold">
+                                          ACTIF
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-right">
+                                      <p className="text-sm font-bold text-amber-700">{formatDureeMs(tp.totalMs)}</p>
+                                      <p className="text-[9px] text-slate-400">
+                                        {tp.sessions.length} session{tp.sessions.length > 1 ? "s" : ""}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="mt-2 space-y-1 border-t border-slate-100 pt-2">
+                                    {tp.sessions.map((s) => (
+                                      <div key={s.id} className="flex items-center justify-between text-[10px]">
+                                        <span className="text-slate-500">
+                                          {formatDate(s.started_at)} {formatTime(s.started_at)}
+                                          {s.ended_at && ` → ${formatTime(s.ended_at)}`}
+                                          {!s.ended_at && " → en cours"}
+                                        </span>
+                                        <span className="font-mono text-slate-600">{formatDuree(s.started_at, s.ended_at)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
                                 </div>
-                                <p className="text-[10px] text-slate-400 mt-0.5">
-                                  {formatDate(p.passage_date)} à {formatTime(p.passage_date)}
-                                </p>
-                                {p.commentaire && (
-                                  <p className="text-xs text-slate-600 mt-1 italic">"{p.commentaire}"</p>
-                                )}
-                              </div>
-                            </div>
-                          ))}
+                              );
+                            })}
+                          </div>
                         </div>
                       )}
+
+                      <div>
+                        <p className="text-xs font-semibold text-slate-600 mb-3 flex items-center gap-1">
+                          <History size={12} /> Historique ({historique.length} passages)
+                        </p>
+                        {historique.length === 0 ? (
+                          <p className="text-xs text-slate-400 italic">Aucun passage enregistré.</p>
+                        ) : (
+                          <div className="space-y-2">
+                            {historique.map((p) => (
+                              <div key={p.id} className="bg-white rounded-lg border border-slate-200 p-3 flex gap-3 hover:shadow-sm transition">
+                                {p.photo_url && (
+                                  <button
+                                    onClick={() => setZoomedPhoto(p.photo_url)}
+                                    className="relative group shrink-0"
+                                    title="Cliquer pour agrandir"
+                                  >
+                                    <img src={p.photo_url} alt="" className="w-16 h-16 object-cover rounded-lg" />
+                                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 rounded-lg flex items-center justify-center transition">
+                                      <ZoomIn size={16} className="text-white opacity-0 group-hover:opacity-100 transition" />
+                                    </div>
+                                  </button>
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-xs font-semibold text-slate-700 flex items-center gap-1.5 flex-wrap">
+                                      <span>{p.ateliers?.name}</span>
+                                      {p.operateurs?.full_name && (
+                                        <>
+                                          <span className="text-slate-300">•</span>
+                                          <span>{p.operateurs.full_name}</span>
+                                        </>
+                                      )}
+                                      {p.types_travaux?.name && (
+                                        <>
+                                          <span className="text-slate-300">•</span>
+                                          <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full text-[10px] font-bold">
+                                            <Wrench size={9} />
+                                            {p.types_travaux.name}
+                                          </span>
+                                        </>
+                                      )}
+                                    </span>
+                                    <span className="text-xs font-bold text-amber-700">{p.pourcentage}%</span>
+                                  </div>
+                                  <p className="text-[10px] text-slate-400 mt-0.5">
+                                    {formatDate(p.passage_date)} à {formatTime(p.passage_date)}
+                                  </p>
+                                  {p.commentaire && (
+                                    <p className="text-xs text-slate-600 mt-1 italic">"{p.commentaire}"</p>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {!loading && (
+          <div className="p-4 border-t border-slate-100 bg-slate-50/50 text-center">
+            <button
+              onClick={openCreate}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-500 hover:text-amber-600 transition"
+            >
+              <PlusCircle size={12} />
+              Équipement non listé (créer une nouvelle fiche)
+            </button>
           </div>
         )}
       </div>
@@ -700,9 +1307,9 @@ export default function JournalPage() {
           className="w-full p-4 flex items-center justify-between text-left hover:bg-slate-50 transition"
         >
           <h2 className="font-semibold text-slate-700 text-sm flex items-center gap-2">
-            <CheckCircle2 size={16} className="text-green-600" />
+            <CheckCircle2 size={16} className="text-slate-600" />
             Équipements livrés
-            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-bold">
+            <span className="text-xs bg-slate-200 text-slate-700 px-2 py-0.5 rounded-full font-bold">
               {equipementsLivres.length}
             </span>
           </h2>
@@ -718,12 +1325,12 @@ export default function JournalPage() {
                 <div key={e.id} className="p-4 flex items-center justify-between hover:bg-slate-50/40 transition">
                   <div>
                     <p className="text-sm font-medium text-slate-700">
-                      {e.reference || "Sans réf."} — {e.client_name}
+                      {e.code_faratec || "Sans code"} — {e.client_name}
                     </p>
                     <p className="text-xs text-slate-500">{e.type_equipement}</p>
                   </div>
                   <div className="text-right">
-                    <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-semibold">
+                    <span className="text-xs bg-slate-600 text-white px-2 py-1 rounded-full font-semibold">
                       LIVRÉ
                     </span>
                     {e.date_livraison_reelle && (
@@ -743,7 +1350,7 @@ export default function JournalPage() {
       {creatingEquipement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeCreate} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
               <div>
                 <h3 className="font-bold text-slate-800 flex items-center gap-2">
@@ -751,7 +1358,7 @@ export default function JournalPage() {
                   Nouvel équipement
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Créez la fiche, puis enregistrez immédiatement une observation.
+                  Cas exceptionnel : équipement non enregistré à la réception.
                 </p>
               </div>
               <button onClick={closeCreate} className="text-slate-400 hover:text-slate-600 p-1 transition">
@@ -759,75 +1366,8 @@ export default function JournalPage() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Référence *</label>
-                  <input
-                    value={newEqForm.reference}
-                    onChange={(e) => { setNewEqForm((f) => ({ ...f, reference: e.target.value })); setNewEqErrors((p) => ({ ...p, reference: "" })); }}
-                    placeholder="Ex: REF-2025-001"
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${newEqErrors.reference ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {newEqErrors.reference && <p className="text-xs text-red-600 mt-1">{newEqErrors.reference}</p>}
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
-                  <input
-                    value={newEqForm.client_name}
-                    onChange={(e) => { setNewEqForm((f) => ({ ...f, client_name: e.target.value })); setNewEqErrors((p) => ({ ...p, client_name: "" })); }}
-                    placeholder="Nom du client"
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${newEqErrors.client_name ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {newEqErrors.client_name && <p className="text-xs text-red-600 mt-1">{newEqErrors.client_name}</p>}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
-                <input
-                  value={newEqForm.type_equipement}
-                  onChange={(e) => { setNewEqForm((f) => ({ ...f, type_equipement: e.target.value })); setNewEqErrors((p) => ({ ...p, type_equipement: "" })); }}
-                  placeholder="Ex: Moteur électrique, Pompe, etc."
-                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${newEqErrors.type_equipement ? "border-red-400" : "border-slate-200"}`}
-                />
-                {newEqErrors.type_equipement && <p className="text-xs text-red-600 mt-1">{newEqErrors.type_equipement}</p>}
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Marque</label>
-                  <input
-                    value={newEqForm.marque}
-                    onChange={(e) => setNewEqForm((f) => ({ ...f, marque: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Puissance (kW)</label>
-                  <input
-                    type="number"
-                    value={newEqForm.puissance_kw}
-                    onChange={(e) => setNewEqForm((f) => ({ ...f, puissance_kw: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
-                  <input
-                    value={newEqForm.operateur}
-                    onChange={(e) => setNewEqForm((f) => ({ ...f, operateur: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2">
-                <Info size={14} className="text-amber-600 shrink-0 mt-0.5" />
-                <p className="text-xs text-amber-800">
-                  Après la création, la fenêtre d'observation s'ouvrira automatiquement pour enregistrer le premier passage.
-                </p>
-              </div>
+            <div className="p-5">
+              {renderFormFields(newEqForm, setNewEqForm, newCustomType, setNewCustomType, newEqErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">
@@ -854,7 +1394,7 @@ export default function JournalPage() {
             <div className="p-5 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
               <div>
                 <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                  {selectedEquipement.reference || "Sans réf."}
+                  {selectedEquipement.code_faratec || "Sans code"}
                   <span className="text-xs font-normal text-slate-500">— {selectedEquipement.client_name}</span>
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">{selectedEquipement.type_equipement}</p>
@@ -879,16 +1419,35 @@ export default function JournalPage() {
                   {errors.atelierId && <p className="text-xs text-red-600 mt-1">{errors.atelierId}</p>}
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Technicien</label>
+                  <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
                   <select
-                    value={technicienId}
-                    onChange={(e) => setTechnicienId(e.target.value)}
+                    value={operateurId}
+                    onChange={(e) => setOperateurId(e.target.value)}
                     className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
                   >
                     <option value="">Optionnel</option>
-                    {techniciens.map((t) => <option key={t.id} value={t.id}>{t.full_name}</option>)}
+                    {operateurs.map((o) => <option key={o.id} value={o.id}>{o.full_name}</option>)}
                   </select>
                 </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-slate-600 block mb-1 flex items-center gap-1">
+                  <Wrench size={12} className="text-amber-600" />
+                  Type de travail
+                </label>
+                <select
+                  value={typeTravailId}
+                  onChange={(e) => setTypeTravailId(e.target.value)}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                >
+                  <option value="">Optionnel (Démontage, Bobinage, etc.)</option>
+                  {typesTravaux.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}{t.code ? ` (${t.code})` : ""}
+                    </option>
+                  ))}
+                </select>
               </div>
 
               <div>
@@ -961,7 +1520,7 @@ export default function JournalPage() {
       {editingEquipement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeEdit} />
-          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
               <div>
                 <h3 className="font-bold text-slate-800 flex items-center gap-2">
@@ -975,65 +1534,8 @@ export default function JournalPage() {
               </button>
             </div>
 
-            <div className="p-5 space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Référence *</label>
-                  <input
-                    value={editForm.reference}
-                    onChange={(e) => { setEditForm((f) => ({ ...f, reference: e.target.value })); setEditErrors((p) => ({ ...p, reference: "" })); }}
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none ${editErrors.reference ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {editErrors.reference && <p className="text-xs text-red-600 mt-1">{editErrors.reference}</p>}
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
-                  <input
-                    value={editForm.client_name}
-                    onChange={(e) => { setEditForm((f) => ({ ...f, client_name: e.target.value })); setEditErrors((p) => ({ ...p, client_name: "" })); }}
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none ${editErrors.client_name ? "border-red-400" : "border-slate-200"}`}
-                  />
-                  {editErrors.client_name && <p className="text-xs text-red-600 mt-1">{editErrors.client_name}</p>}
-                </div>
-              </div>
-
-              <div>
-                <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
-                <input
-                  value={editForm.type_equipement}
-                  onChange={(e) => { setEditForm((f) => ({ ...f, type_equipement: e.target.value })); setEditErrors((p) => ({ ...p, type_equipement: "" })); }}
-                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none ${editErrors.type_equipement ? "border-red-400" : "border-slate-200"}`}
-                />
-                {editErrors.type_equipement && <p className="text-xs text-red-600 mt-1">{editErrors.type_equipement}</p>}
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Marque</label>
-                  <input
-                    value={editForm.marque}
-                    onChange={(e) => setEditForm((f) => ({ ...f, marque: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Puissance (kW)</label>
-                  <input
-                    type="number"
-                    value={editForm.puissance_kw}
-                    onChange={(e) => setEditForm((f) => ({ ...f, puissance_kw: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
-                  <input
-                    value={editForm.operateur}
-                    onChange={(e) => setEditForm((f) => ({ ...f, operateur: e.target.value }))}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                  />
-                </div>
-              </div>
+            <div className="p-5">
+              {renderFormFields(editForm, setEditForm, editCustomType, setEditCustomType, editErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">
@@ -1049,6 +1551,27 @@ export default function JournalPage() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* --- MODALE PHOTO ZOOM --- */}
+      {zoomedPhoto && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm cursor-zoom-out"
+          onClick={() => setZoomedPhoto(null)}
+        >
+          <button
+            onClick={() => setZoomedPhoto(null)}
+            className="absolute top-4 right-4 text-white hover:text-amber-400 transition p-2 bg-black/50 rounded-full"
+          >
+            <X size={24} />
+          </button>
+          <img
+            src={zoomedPhoto}
+            alt="Photo agrandie"
+            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
         </div>
       )}
     </div>
