@@ -9,6 +9,9 @@ import {
   Hourglass, PlayCircle, Flag, Timer, CalendarClock, StopCircle, User,
   Calculator,
 } from "lucide-react";
+import SearchableSelect from "../components/SearchableSelect";
+import { calculerTempsTravail, formatDureeMinutes, getSessionAutoCloseDate } from "../lib/workTime";
+import { analyserEquipement, type CoefficientTravail } from "../lib/optimization";
 
 // --- TYPES ---
 interface Equipement {
@@ -37,6 +40,7 @@ interface Atelier { id: string; name: string; }
 interface Operateur { id: string; full_name: string; }
 interface TypeTravail { id: string; name: string; code: string | null; }
 interface TypeEquipement { id: string; name: string; }
+interface NatureTravaux { id: string; name: string; }
 interface Tournee { id: string; started_at: string; ended_at: string | null; }
 interface Passage {
   id: string;
@@ -87,22 +91,6 @@ const getDaysBetween = (from: string, to: string | null): number => {
   return Math.max(0, Math.floor((endDate.getTime() - startDate.getTime()) / 86400000));
 };
 
-const formatDuree = (startIso: string, endIso: string | null): string => {
-  const start = new Date(startIso).getTime();
-  const end = endIso ? new Date(endIso).getTime() : Date.now();
-  const diffMs = Math.max(0, end - start);
-  const totalMin = Math.floor(diffMs / 60000);
-  const hours = Math.floor(totalMin / 60);
-  const mins = totalMin % 60;
-  if (hours === 0) return `${mins}min`;
-  if (hours > 24) {
-    const days = Math.floor(hours / 24);
-    const remainingHours = hours % 24;
-    return `${days}j ${remainingHours}h`;
-  }
-  return `${hours}h${mins.toString().padStart(2, "0")}`;
-};
-
 const getProgressColor = (p: number) => {
   if (p < 30) return "bg-red-500";
   if (p < 70) return "bg-amber-500";
@@ -140,12 +128,15 @@ export default function JournalPage() {
   const [saving, setSaving] = useState(false);
   const [savingIntervention, setSavingIntervention] = useState(false);
   const [stoppingSession, setStoppingSession] = useState<string | null>(null);
+  const [, setTick] = useState(0);
 
   const [equipements, setEquipements] = useState<Equipement[]>([]);
   const [ateliers, setAteliers] = useState<Atelier[]>([]);
   const [operateurs, setOperateurs] = useState<Operateur[]>([]);
   const [typesTravaux, setTypesTravaux] = useState<TypeTravail[]>([]);
   const [typesEquipement, setTypesEquipement] = useState<TypeEquipement[]>([]);
+  const [naturesTravaux, setNaturesTravaux] = useState<NatureTravaux[]>([]);
+  const [coefficients, setCoefficients] = useState<CoefficientTravail[]>([]);
   const [passages, setPassages] = useState<Passage[]>([]);
   const [sessions, setSessions] = useState<SessionOperateur[]>([]);
   const [tourneeActive, setTourneeActive] = useState<Tournee | null>(null);
@@ -167,27 +158,33 @@ export default function JournalPage() {
 
   const [editingEquipement, setEditingEquipement] = useState<Equipement | null>(null);
   const [editForm, setEditForm] = useState({ ...EMPTY_NEW_EQ });
-  const [editCustomType, setEditCustomType] = useState("");
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
 
   const [creatingEquipement, setCreatingEquipement] = useState(false);
   const [newEqForm, setNewEqForm] = useState({ ...EMPTY_NEW_EQ });
-  const [newCustomType, setNewCustomType] = useState("");
   const [newEqErrors, setNewEqErrors] = useState<Record<string, string>>({});
   const [newEqSaving, setNewEqSaving] = useState(false);
 
   const [zoomedPhoto, setZoomedPhoto] = useState<string | null>(null);
 
+  // --- HORLOGE ---
+  useEffect(() => {
+    const interval = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   // --- CHARGEMENT ---
   const load = async () => {
     setLoading(true);
-    const [eqRes, atRes, opRes, ttRes, teRes, passRes, tourneeRes, sessRes] = await Promise.all([
+    const [eqRes, atRes, opRes, ttRes, teRes, ntRes, coefRes, passRes, tourneeRes, sessRes] = await Promise.all([
       supabase.from("equipements").select("*").is("deleted_at", null).order("created_at", { ascending: false }),
       supabase.from("ateliers").select("id, name").order("name"),
       supabase.from("operateurs").select("id, full_name").eq("is_active", true).order("full_name"),
       supabase.from("types_travaux").select("id, name, code").order("name"),
       supabase.from("types_equipement").select("id, name").order("name"),
+      supabase.from("natures_travaux").select("id, name").order("name"),
+      supabase.from("coefficients_travaux").select("id, type_travail, puissance_min, puissance_max, temps_attendu_jours, tolerance_pourcentage"),
       supabase.from("journal_passages")
         .select("*, ateliers(name), operateurs(full_name), types_travaux(name, code)")
         .is("deleted_at", null)
@@ -205,8 +202,25 @@ export default function JournalPage() {
     setOperateurs((opRes.data as Operateur[]) || []);
     setTypesTravaux((ttRes.data as TypeTravail[]) || []);
     setTypesEquipement((teRes.data as TypeEquipement[]) || []);
+    setNaturesTravaux((ntRes.data as NatureTravaux[]) || []);
+    setCoefficients((coefRes.data as CoefficientTravail[]) || []);
     setPassages((passRes.data as unknown as Passage[]) || []);
-    setSessions((sessRes.data as unknown as SessionOperateur[]) || []);
+
+    let allSessions = (sessRes.data as unknown as SessionOperateur[]) || [];
+
+    // Fermeture auto des sessions orphelines
+    const orphelines = allSessions.filter((s) => !s.ended_at && getSessionAutoCloseDate(s.started_at) !== null);
+    if (orphelines.length > 0) {
+      for (const s of orphelines) {
+        const autoCloseDate = getSessionAutoCloseDate(s.started_at);
+        if (autoCloseDate) {
+          await supabase.from("interventions_operateurs").update({ ended_at: autoCloseDate }).eq("id", s.id);
+          s.ended_at = autoCloseDate;
+        }
+      }
+    }
+
+    setSessions(allSessions);
     setTourneeActive(tourneeRes.data && tourneeRes.data.length > 0 ? (tourneeRes.data[0] as Tournee) : null);
     setLoading(false);
   };
@@ -333,33 +347,43 @@ export default function JournalPage() {
     setTourneeActive(null);
   };
 
-  // --- CRÉATION ---
-  const openCreate = () => {
-    setCreatingEquipement(true);
-    setNewEqForm({ ...EMPTY_NEW_EQ });
-    setNewCustomType("");
-    setNewEqErrors({});
-  };
-
-  const closeCreate = () => {
-    setCreatingEquipement(false);
-    setNewEqErrors({});
-    setNewCustomType("");
-  };
-
-  const handleCreateTypeIfNeeded = async (typeName: string): Promise<string> => {
-    if (!user || !typeName.trim()) return typeName.trim();
-    const existing = typesEquipement.find((t) => t.name.toLowerCase() === typeName.trim().toLowerCase());
-    if (existing) return existing.name;
+  // --- GESTION DES TYPES ---
+  const handleCreateTypeEquipement = async (typeName: string) => {
+    if (!user || !typeName.trim()) return;
     const { data } = await supabase.from("types_equipement").insert({
       name: typeName.trim(),
       owner_id: user.id,
     }).select().single();
     if (data) {
       setTypesEquipement((prev) => [...prev, data as TypeEquipement].sort((a, b) => a.name.localeCompare(b.name)));
-      return (data as TypeEquipement).name;
+      setNewEqForm((f) => ({ ...f, type_equipement: (data as TypeEquipement).name }));
+      setEditForm((f) => ({ ...f, type_equipement: (data as TypeEquipement).name }));
     }
-    return typeName.trim();
+  };
+
+  const handleCreateNatureTravaux = async (natureName: string) => {
+    if (!user || !natureName.trim()) return;
+    const { data } = await supabase.from("natures_travaux").insert({
+      name: natureName.trim(),
+      owner_id: user.id,
+    }).select().single();
+    if (data) {
+      setNaturesTravaux((prev) => [...prev, data as NatureTravaux].sort((a, b) => a.name.localeCompare(b.name)));
+      setNewEqForm((f) => ({ ...f, nature_travaux: (data as NatureTravaux).name }));
+      setEditForm((f) => ({ ...f, nature_travaux: (data as NatureTravaux).name }));
+    }
+  };
+
+  // --- CRÉATION ---
+  const openCreate = () => {
+    setCreatingEquipement(true);
+    setNewEqForm({ ...EMPTY_NEW_EQ });
+    setNewEqErrors({});
+  };
+
+  const closeCreate = () => {
+    setCreatingEquipement(false);
+    setNewEqErrors({});
   };
 
   const handleCreateEquipement = async () => {
@@ -367,19 +391,17 @@ export default function JournalPage() {
     const errs: Record<string, string> = {};
     if (!newEqForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
     if (!newEqForm.client_name.trim()) errs.client_name = "Obligatoire";
-    const finalType = newEqForm.type_equipement === "__autre__" ? newCustomType : newEqForm.type_equipement;
-    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
+    if (!newEqForm.type_equipement.trim()) errs.type_equipement = "Obligatoire";
     setNewEqErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setNewEqSaving(true);
-    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
     const semaine = getWeekNumber(new Date());
 
     const { data, error } = await supabase.from("equipements").insert({
       code_faratec: newEqForm.code_faratec.trim(),
       client_name: newEqForm.client_name.trim(),
-      type_equipement: typeFinalName,
+      type_equipement: newEqForm.type_equipement,
       ndi_da_ns: newEqForm.ndi_da_ns.trim() || null,
       mle_reference: newEqForm.mle_reference.trim() || null,
       marque: newEqForm.marque.trim() || null,
@@ -388,7 +410,7 @@ export default function JournalPage() {
       vitesse: newEqForm.vitesse.trim() || null,
       operateur: newEqForm.operateur.trim() || null,
       urgence: newEqForm.urgence || "normal",
-      nature_travaux: newEqForm.nature_travaux.trim() || null,
+      nature_travaux: newEqForm.nature_travaux || null,
       owner_id: user.id,
       statut: "en_attente",
       pourcentage_global: 0,
@@ -434,15 +456,9 @@ export default function JournalPage() {
     setPhotoPreview(URL.createObjectURL(file));
   };
 
-  const demarrerSessionSiNecessaire = async (
-    equipementId: string,
-    opId: string,
-    atId: string
-  ): Promise<void> => {
+  const demarrerSessionSiNecessaire = async (equipementId: string, opId: string, atId: string): Promise<void> => {
     if (!user || !opId) return;
-    const existing = sessions.find(
-      (s) => s.equipement_id === equipementId && s.operateur_id === opId && !s.ended_at
-    );
+    const existing = sessions.find((s) => s.equipement_id === equipementId && s.operateur_id === opId && !s.ended_at);
     if (existing) return;
 
     const { data } = await supabase.from("interventions_operateurs").insert({
@@ -452,18 +468,14 @@ export default function JournalPage() {
       owner_id: user.id,
     }).select("*, operateurs(full_name), ateliers(name)").single();
 
-    if (data) {
-      setSessions((prev) => [data as unknown as SessionOperateur, ...prev]);
-    }
+    if (data) setSessions((prev) => [data as unknown as SessionOperateur, ...prev]);
   };
 
   const handleStopSession = async (sessionId: string) => {
     if (stoppingSession) return;
     setStoppingSession(sessionId);
     const now = new Date().toISOString();
-    setSessions((prev) =>
-      prev.map((s) => (s.id === sessionId ? { ...s, ended_at: now } : s))
-    );
+    setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ended_at: now } : s)));
     await supabase.from("interventions_operateurs").update({ ended_at: now }).eq("id", sessionId);
     setStoppingSession(null);
   };
@@ -482,7 +494,6 @@ export default function JournalPage() {
 
     const isFirstPassage = !selectedEquipement.date_debut_intervention;
     const dateDebutIntervention = isFirstPassage ? now : selectedEquipement.date_debut_intervention;
-
     const nouveauStatut = newPct >= 100 ? "termine" : "en_reparation";
 
     let photoUrl: string | null = null;
@@ -532,10 +543,7 @@ export default function JournalPage() {
       tournee_id: tourneeActive?.id || null,
     });
 
-    const updateData: Record<string, any> = {
-      pourcentage_global: newPct,
-      statut: nouveauStatut,
-    };
+    const updateData: Record<string, any> = { pourcentage_global: newPct, statut: nouveauStatut };
     if (isFirstPassage) updateData.date_debut_intervention = dateDebutIntervention;
     await supabase.from("equipements").update(updateData).eq("id", selectedEquipement.id);
 
@@ -551,9 +559,7 @@ export default function JournalPage() {
     if (savingIntervention) return;
     setSavingIntervention(true);
     const now = new Date().toISOString();
-    setEquipements((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, date_fin_intervention: now } : e))
-    );
+    setEquipements((prev) => prev.map((e) => (e.id === id ? { ...e, date_fin_intervention: now } : e)));
     await supabase.from("equipements").update({ date_fin_intervention: now }).eq("id", id);
     setSavingIntervention(false);
   };
@@ -575,11 +581,10 @@ export default function JournalPage() {
   // --- ÉDITION ---
   const openEdit = (eq: Equipement) => {
     setEditingEquipement(eq);
-    const isKnownType = typesEquipement.some((t) => t.name === eq.type_equipement);
     setEditForm({
       code_faratec: eq.code_faratec || "",
       client_name: eq.client_name || "",
-      type_equipement: isKnownType ? eq.type_equipement : "__autre__",
+      type_equipement: eq.type_equipement || "",
       ndi_da_ns: eq.ndi_da_ns || "",
       mle_reference: eq.mle_reference || "",
       marque: eq.marque || "",
@@ -590,14 +595,12 @@ export default function JournalPage() {
       urgence: eq.urgence || "normal",
       nature_travaux: eq.nature_travaux || "",
     });
-    setEditCustomType(isKnownType ? "" : (eq.type_equipement || ""));
     setEditErrors({});
   };
 
   const closeEdit = () => {
     setEditingEquipement(null);
     setEditErrors({});
-    setEditCustomType("");
   };
 
   const handleSaveEdit = async () => {
@@ -605,19 +608,17 @@ export default function JournalPage() {
     const errs: Record<string, string> = {};
     if (!editForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
     if (!editForm.client_name.trim()) errs.client_name = "Obligatoire";
-    const finalType = editForm.type_equipement === "__autre__" ? editCustomType : editForm.type_equipement;
-    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
+    if (!editForm.type_equipement.trim()) errs.type_equipement = "Obligatoire";
     setEditErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setEditSaving(true);
-    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
 
     const updated: Equipement = {
       ...editingEquipement,
       code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: typeFinalName,
+      type_equipement: editForm.type_equipement,
       ndi_da_ns: editForm.ndi_da_ns.trim() || null,
       mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
@@ -626,7 +627,7 @@ export default function JournalPage() {
       vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
-      nature_travaux: editForm.nature_travaux.trim() || null,
+      nature_travaux: editForm.nature_travaux || null,
     };
 
     setEquipements((prev) => prev.map((e) => (e.id === editingEquipement.id ? updated : e)));
@@ -634,7 +635,7 @@ export default function JournalPage() {
     await supabase.from("equipements").update({
       code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: typeFinalName,
+      type_equipement: editForm.type_equipement,
       ndi_da_ns: editForm.ndi_da_ns.trim() || null,
       mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
@@ -643,44 +644,28 @@ export default function JournalPage() {
       vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
-      nature_travaux: editForm.nature_travaux.trim() || null,
+      nature_travaux: editForm.nature_travaux || null,
     }).eq("id", editingEquipement.id);
 
     setEditSaving(false);
     closeEdit();
   };
 
-  const getHistorique = (equipementId: string) =>
-    passages.filter((p) => p.equipement_id === equipementId);
+  const getHistorique = (equipementId: string) => passages.filter((p) => p.equipement_id === equipementId);
 
   const getTempsParOperateur = (equipementId: string) => {
     const eqSessions = sessionsParEquipement.get(equipementId) || [];
-    const map = new Map<string, { operateur: string; totalMs: number; sessions: SessionOperateur[] }>();
+    const map = new Map<string, { operateur: string; totalMin: number; sessions: SessionOperateur[] }>();
     eqSessions.forEach((s) => {
-      const end = s.ended_at ? new Date(s.ended_at).getTime() : Date.now();
-      const start = new Date(s.started_at).getTime();
-      const diff = Math.max(0, end - start);
+      const mins = calculerTempsTravail(s.started_at, s.ended_at);
       const key = s.operateur_id;
       const name = s.operateurs?.full_name || "Inconnu";
-      if (!map.has(key)) map.set(key, { operateur: name, totalMs: 0, sessions: [] });
+      if (!map.has(key)) map.set(key, { operateur: name, totalMin: 0, sessions: [] });
       const entry = map.get(key)!;
-      entry.totalMs += diff;
+      entry.totalMin += mins;
       entry.sessions.push(s);
     });
-    return Array.from(map.values()).sort((a, b) => b.totalMs - a.totalMs);
-  };
-
-  const formatDureeMs = (ms: number): string => {
-    const totalMin = Math.floor(ms / 60000);
-    const hours = Math.floor(totalMin / 60);
-    const mins = totalMin % 60;
-    if (hours === 0) return `${mins}min`;
-    if (hours > 24) {
-      const days = Math.floor(hours / 24);
-      const remainingHours = hours % 24;
-      return `${days}j ${remainingHours}h`;
-    }
-    return `${hours}h${mins.toString().padStart(2, "0")}`;
+    return Array.from(map.values()).sort((a, b) => b.totalMin - a.totalMin);
   };
 
   const semaineActuelle = getWeekNumber(new Date());
@@ -688,8 +673,6 @@ export default function JournalPage() {
   const renderFormFields = (
     form: typeof EMPTY_NEW_EQ,
     setForm: React.Dispatch<React.SetStateAction<typeof EMPTY_NEW_EQ>>,
-    customType: string,
-    setCustomType: React.Dispatch<React.SetStateAction<string>>,
     errs: Record<string, string>
   ) => (
     <div className="space-y-5">
@@ -720,25 +703,17 @@ export default function JournalPage() {
         <div className="grid grid-cols-2 gap-3 mt-3">
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
-            <select
+            <SearchableSelect
               value={form.type_equipement}
-              onChange={(e) => { setForm((f) => ({ ...f, type_equipement: e.target.value })); setCustomType(""); }}
-              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errs.type_equipement ? "border-red-400" : "border-slate-200"}`}
-            >
-              <option value="">-- Sélectionner --</option>
-              {typesEquipement.map((t) => (
-                <option key={t.id} value={t.name}>{t.name}</option>
-              ))}
-              <option value="__autre__">+ Autre (saisir)</option>
-            </select>
-            {form.type_equipement === "__autre__" && (
-              <input
-                value={customType}
-                onChange={(e) => setCustomType(e.target.value)}
-                placeholder="Nouveau type d'équipement..."
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm mt-2 focus:ring-2 focus:ring-amber-500 focus:outline-none"
-              />
-            )}
+              onChange={(val) => setForm((f) => ({ ...f, type_equipement: val }))}
+              options={typesEquipement.map((t) => ({ value: t.name, label: t.name }))}
+              placeholder="Sélectionner un type..."
+              searchPlaceholder="Rechercher un type..."
+              error={!!errs.type_equipement}
+              hasOtherOption={true}
+              otherLabel="+ Nouveau type d'équipement"
+              onOtherCreate={handleCreateTypeEquipement}
+            />
             {errs.type_equipement && <p className="text-xs text-red-600 mt-1">{errs.type_equipement}</p>}
           </div>
           <div>
@@ -830,11 +805,15 @@ export default function JournalPage() {
           </div>
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Nature des travaux</label>
-            <input
+            <SearchableSelect
               value={form.nature_travaux}
-              onChange={(e) => setForm((f) => ({ ...f, nature_travaux: e.target.value }))}
-              placeholder="Optionnel (modifiable plus tard)"
-              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              onChange={(val) => setForm((f) => ({ ...f, nature_travaux: val }))}
+              options={naturesTravaux.map((n) => ({ value: n.name, label: n.name }))}
+              placeholder="Sélectionner une nature..."
+              searchPlaceholder="Rechercher..."
+              hasOtherOption={true}
+              otherLabel="+ Nouvelle nature de travaux"
+              onOtherCreate={handleCreateNatureTravaux}
             />
           </div>
         </div>
@@ -1007,6 +986,9 @@ export default function JournalPage() {
               const sessionsActives = sessionsActivesParEquipement.get(e.id) || [];
               const tempsParOperateur = getTempsParOperateur(e.id);
 
+              const sessEq = sessionsParEquipement.get(e.id) || [];
+              const analyse = analyserEquipement(e, sessEq, coefficients);
+
               return (
                 <div key={e.id} className={`transition ${isUrgent ? "bg-red-50/30" : "hover:bg-slate-50/40"}`}>
                   <div className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
@@ -1023,6 +1005,11 @@ export default function JournalPage() {
                         {sessionsActives.length > 0 && (
                           <span className="text-[10px] bg-emerald-600 text-white px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                             <User size={9} /> {sessionsActives.length} EN COURS
+                          </span>
+                        )}
+                        {analyse.est_sur_duree && analyse.temps_reel_jours > 0 && (
+                          <span className="text-[10px] bg-red-600 text-white px-2 py-0.5 rounded-full font-bold flex items-center gap-1" title={`Attendu: ${analyse.temps_attendu_jours}j / Réel: ${analyse.temps_reel_jours}j (+${analyse.depassement_pourcentage}%)`}>
+                            <AlertTriangle size={9} /> SUR-DURÉE +{analyse.depassement_pourcentage}%
                           </span>
                         )}
                         <span className="font-bold text-slate-800 text-sm">
@@ -1062,13 +1049,12 @@ export default function JournalPage() {
                                 {s.operateurs?.full_name}
                               </span>
                               <span className="text-[10px] text-emerald-600 font-mono">
-                                {formatDuree(s.started_at, s.ended_at)}
+                                {formatDureeMinutes(calculerTempsTravail(s.started_at, s.ended_at))}
                               </span>
                               <button
                                 onClick={() => handleStopSession(s.id)}
                                 disabled={stoppingSession === s.id}
                                 className="text-[10px] bg-red-100 hover:bg-red-200 text-red-700 rounded px-1.5 py-0.5 font-bold transition disabled:opacity-50"
-                                title="Arrêter la session"
                               >
                                 {stoppingSession === s.id ? "..." : "STOP"}
                               </button>
@@ -1112,7 +1098,6 @@ export default function JournalPage() {
                           onClick={() => handleTerminerIntervention(e.id)}
                           disabled={savingIntervention}
                           className="flex items-center gap-1 bg-orange-600 hover:bg-orange-700 text-white rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition disabled:opacity-50"
-                          title="Terminer l'intervention"
                         >
                           <StopCircle size={12} /> Terminer
                         </button>
@@ -1130,7 +1115,7 @@ export default function JournalPage() {
                         className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition ${
                           canLivrer ? "text-violet-700 hover:bg-violet-50" : "text-slate-300 cursor-not-allowed"
                         }`}
-                        title={canLivrer ? "Marquer comme livré" : `Impossible : l'équipement est à ${e.pourcentage_global}% (100% requis)`}
+                        title={canLivrer ? "Marquer comme livré" : `Impossible : ${e.pourcentage_global}%`}
                       >
                         <Truck size={12} />
                       </button>
@@ -1178,7 +1163,7 @@ export default function JournalPage() {
                       {tempsParOperateur.length > 0 && (
                         <div>
                           <p className="text-xs font-semibold text-slate-600 mb-3 flex items-center gap-1">
-                            <User size={12} /> Temps passé par opérateur
+                            <User size={12} /> Temps de travail effectif par opérateur
                           </p>
                           <div className="space-y-2">
                             {tempsParOperateur.map((tp, i) => {
@@ -1198,7 +1183,7 @@ export default function JournalPage() {
                                       )}
                                     </div>
                                     <div className="text-right">
-                                      <p className="text-sm font-bold text-amber-700">{formatDureeMs(tp.totalMs)}</p>
+                                      <p className="text-sm font-bold text-amber-700">{formatDureeMinutes(tp.totalMin)}</p>
                                       <p className="text-[9px] text-slate-400">
                                         {tp.sessions.length} session{tp.sessions.length > 1 ? "s" : ""}
                                       </p>
@@ -1212,7 +1197,9 @@ export default function JournalPage() {
                                           {s.ended_at && ` → ${formatTime(s.ended_at)}`}
                                           {!s.ended_at && " → en cours"}
                                         </span>
-                                        <span className="font-mono text-slate-600">{formatDuree(s.started_at, s.ended_at)}</span>
+                                        <span className="font-mono text-slate-600">
+                                          {formatDureeMinutes(calculerTempsTravail(s.started_at, s.ended_at))}
+                                        </span>
                                       </div>
                                     ))}
                                   </div>
@@ -1237,7 +1224,6 @@ export default function JournalPage() {
                                   <button
                                     onClick={() => setZoomedPhoto(p.photo_url)}
                                     className="relative group shrink-0"
-                                    title="Cliquer pour agrandir"
                                   >
                                     <img src={p.photo_url} alt="" className="w-16 h-16 object-cover rounded-lg" />
                                     <div className="absolute inset-0 bg-black/0 group-hover:bg-black/40 rounded-lg flex items-center justify-center transition">
@@ -1357,9 +1343,7 @@ export default function JournalPage() {
                   <Sparkles size={16} className="text-amber-600" />
                   Nouvel équipement
                 </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Cas exceptionnel : équipement non enregistré à la réception.
-                </p>
+                <p className="text-xs text-slate-500 mt-0.5">Cas exceptionnel : équipement non enregistré à la réception.</p>
               </div>
               <button onClick={closeCreate} className="text-slate-400 hover:text-slate-600 p-1 transition">
                 <X size={20} />
@@ -1367,7 +1351,7 @@ export default function JournalPage() {
             </div>
 
             <div className="p-5">
-              {renderFormFields(newEqForm, setNewEqForm, newCustomType, setNewCustomType, newEqErrors)}
+              {renderFormFields(newEqForm, setNewEqForm, newEqErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">
@@ -1408,26 +1392,27 @@ export default function JournalPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-medium text-slate-600 block mb-1">Atelier *</label>
-                  <select
+                  <SearchableSelect
                     value={atelierId}
-                    onChange={(e) => { setAtelierId(e.target.value); setErrors((p) => ({ ...p, atelierId: "" })); }}
-                    className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.atelierId ? "border-red-400" : "border-slate-200"}`}
-                  >
-                    <option value="">Sélectionner</option>
-                    {ateliers.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                  </select>
+                    onChange={(val) => { setAtelierId(val); setErrors((p) => ({ ...p, atelierId: "" })); }}
+                    options={ateliers.map((a) => ({ value: a.id, label: a.name }))}
+                    placeholder="Sélectionner un atelier..."
+                    searchPlaceholder="Rechercher un atelier..."
+                    emptyMessage="Aucun atelier trouvé"
+                    error={!!errors.atelierId}
+                  />
                   {errors.atelierId && <p className="text-xs text-red-600 mt-1">{errors.atelierId}</p>}
                 </div>
                 <div>
                   <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
-                  <select
+                  <SearchableSelect
                     value={operateurId}
-                    onChange={(e) => setOperateurId(e.target.value)}
-                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                  >
-                    <option value="">Optionnel</option>
-                    {operateurs.map((o) => <option key={o.id} value={o.id}>{o.full_name}</option>)}
-                  </select>
+                    onChange={(val) => setOperateurId(val)}
+                    options={operateurs.map((o) => ({ value: o.id, label: o.full_name }))}
+                    placeholder="Optionnel"
+                    searchPlaceholder="Rechercher un opérateur..."
+                    emptyMessage="Aucun opérateur trouvé"
+                  />
                 </div>
               </div>
 
@@ -1436,18 +1421,18 @@ export default function JournalPage() {
                   <Wrench size={12} className="text-amber-600" />
                   Type de travail
                 </label>
-                <select
+                <SearchableSelect
                   value={typeTravailId}
-                  onChange={(e) => setTypeTravailId(e.target.value)}
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                >
-                  <option value="">Optionnel (Démontage, Bobinage, etc.)</option>
-                  {typesTravaux.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}{t.code ? ` (${t.code})` : ""}
-                    </option>
-                  ))}
-                </select>
+                  onChange={(val) => setTypeTravailId(val)}
+                  options={typesTravaux.map((t) => ({
+                    value: t.id,
+                    label: t.name,
+                    sublabel: t.code || undefined,
+                  }))}
+                  placeholder="Optionnel (Démontage, Bobinage, etc.)"
+                  searchPlaceholder="Rechercher un type de travail..."
+                  emptyMessage="Aucun type trouvé"
+                />
               </div>
 
               <div>
@@ -1535,7 +1520,7 @@ export default function JournalPage() {
             </div>
 
             <div className="p-5">
-              {renderFormFields(editForm, setEditForm, editCustomType, setEditCustomType, editErrors)}
+              {renderFormFields(editForm, setEditForm, editErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">

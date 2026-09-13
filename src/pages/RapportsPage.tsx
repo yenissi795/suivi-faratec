@@ -2,10 +2,22 @@ import { useEffect, useState, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import {
   Calendar, CalendarDays, CalendarRange, FileDown,
-  TrendingUp, TrendingDown, AlertTriangle, Target, Users, Factory,
-  Package, Clock, CalendarClock, FileSpreadsheet, Award, Activity
+  TrendingUp, AlertTriangle, Target, Users, Factory,
+  Package, CalendarClock, FileSpreadsheet, Award, Activity,
+  Gauge, Coins, Wrench, Truck, Droplet, CheckCircle2, Info
 } from "lucide-react";
 import { buildRapportPdf, buildCsv } from "../lib/reportPdf";
+import {
+  analyserEquipement,
+  getEfficaciteColor,
+  getTranchePuissance,
+  isEquipementTermine,
+  SEUIL_MIN_EQUIPEMENTS,
+  type CoefficientTravail,
+  type EquipementAnalyse,
+  type SessionAnalyse,
+} from "../lib/optimization";
+import { calculerTempsTravail } from "../lib/workTime";
 
 // --- TYPES ---
 interface Equipement {
@@ -14,10 +26,12 @@ interface Equipement {
   type_equipement: string;
   code_faratec: string | null;
   statut: string;
-  date_entree: string;
-  pourcentage_global: number;
   created_at: string;
-  semaine_entree: number | null;
+  pourcentage_global: number;
+  puissance_kw: number | null;
+  nature_travaux: string | null;
+  date_debut_intervention: string | null;
+  date_fin_intervention: string | null;
 }
 interface Passage {
   id: string;
@@ -29,6 +43,20 @@ interface Passage {
 }
 interface Atelier { id: string; name: string; }
 interface Operateur { id: string; full_name: string; }
+interface Session {
+  id: string;
+  equipement_id: string;
+  operateur_id: string;
+  started_at: string;
+  ended_at: string | null;
+}
+interface LigneCout {
+  id: string;
+  equipement_id: string;
+  type_ligne: string;
+  quantite: number;
+  prix_unitaire: number;
+}
 
 type PeriodType = "jour" | "semaine" | "mois" | "annee" | "custom";
 
@@ -37,9 +65,13 @@ export default function RapportsPage() {
   const [passages, setPassages] = useState<Passage[]>([]);
   const [ateliers, setAteliers] = useState<Atelier[]>([]);
   const [operateurs, setOperateurs] = useState<Operateur[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [lignesCout, setLignesCout] = useState<LigneCout[]>([]);
+  const [coefficients, setCoefficients] = useState<CoefficientTravail[]>([]);
   const [loading, setLoading] = useState(true);
-  const [period, setPeriod] = useState<PeriodType>("jour");
+  const [period, setPeriod] = useState<PeriodType>("mois");
   const [downloading, setDownloading] = useState(false);
+  const [mainTab, setMainTab] = useState<"activite" | "performance" | "financier" | "client">("activite");
 
   const [customStart, setCustomStart] = useState(() => {
     const d = new Date(); d.setDate(1); return d.toISOString().slice(0, 10);
@@ -48,16 +80,22 @@ export default function RapportsPage() {
 
   useEffect(() => {
     const load = async () => {
-      const [eqRes, passRes, atRes, opRes] = await Promise.all([
-        supabase.from("equipements").select("*").is("deleted_at", null),
-        supabase.from("journal_passages").select("*").is("deleted_at", null).order("passage_date", { ascending: true }),
+      const [eqRes, passRes, atRes, opRes, sessRes, coutRes, coefRes] = await Promise.all([
+        supabase.from("equipements").select("id, client_name, type_equipement, code_faratec, statut, created_at, pourcentage_global, puissance_kw, nature_travaux, date_debut_intervention, date_fin_intervention").is("deleted_at", null),
+        supabase.from("journal_passages").select("id, equipement_id, atelier_id, operateur_id, pourcentage, passage_date").is("deleted_at", null).order("passage_date", { ascending: true }),
         supabase.from("ateliers").select("id, name"),
         supabase.from("operateurs").select("id, full_name"),
+        supabase.from("interventions_operateurs").select("id, equipement_id, operateur_id, started_at, ended_at"),
+        supabase.from("lignes_cout").select("id, equipement_id, type_ligne, quantite, prix_unitaire"),
+        supabase.from("coefficients_travaux").select("id, type_travail, puissance_min, puissance_max, temps_attendu_jours, tolerance_pourcentage"),
       ]);
       setEquipements((eqRes.data as Equipement[]) || []);
       setPassages((passRes.data as Passage[]) || []);
       setAteliers((atRes.data as Atelier[]) || []);
       setOperateurs((opRes.data as Operateur[]) || []);
+      setSessions((sessRes.data as Session[]) || []);
+      setLignesCout((coutRes.data as LigneCout[]) || []);
+      setCoefficients((coefRes.data as CoefficientTravail[]) || []);
       setLoading(false);
     };
     load();
@@ -90,18 +128,12 @@ export default function RapportsPage() {
 
     return {
       jour: { start: startOfDay, end: endOfDay, label: now.toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" }) },
-      semaine: { start: monday, end: saturdayNoon, label: `Du ${monday.toLocaleDateString("fr-FR")} au ${saturdayNoon.toLocaleDateString("fr-FR")} (samedi midi)` },
+      semaine: { start: monday, end: saturdayNoon, label: `Du ${monday.toLocaleDateString("fr-FR")} au ${saturdayNoon.toLocaleDateString("fr-FR")}` },
       mois: { start: startOfMonth, end: endOfMonth, label: now.toLocaleDateString("fr-FR", { month: "long", year: "numeric" }) },
       annee: { start: startOfYear, end: endOfYear, label: `Annee ${now.getFullYear()}` },
       custom: { start: cS, end: cE, label: `Du ${cS.toLocaleDateString("fr-FR")} au ${cE.toLocaleDateString("fr-FR")}` },
     };
   }, [customStart, customEnd, now]);
-
-  const previousBounds = useMemo(() => {
-    const b = bounds[period];
-    const duration = b.end.getTime() - b.start.getTime();
-    return { start: new Date(b.start.getTime() - duration), end: new Date(b.start.getTime() - 1) };
-  }, [period, bounds]);
 
   const inRange = (iso: string, range: { start: Date; end: Date }) => {
     const d = new Date(iso);
@@ -111,14 +143,14 @@ export default function RapportsPage() {
   const currentRange = bounds[period];
 
   const passagesInPeriod = useMemo(() => passages.filter((p) => inRange(p.passage_date, currentRange)), [passages, currentRange]);
-  const passagesPrev = useMemo(() => passages.filter((p) => inRange(p.passage_date, previousBounds)), [passages, previousBounds]);
-
+  const sessionsInPeriod = useMemo(() => sessions.filter((s) => inRange(s.started_at, currentRange)), [sessions, currentRange]);
   const equipementsInPeriod = useMemo(() => equipements.filter((e) => inRange(e.created_at, currentRange)), [equipements, currentRange]);
-  const equipementsPrev = useMemo(() => equipements.filter((e) => inRange(e.created_at, previousBounds)), [equipements, previousBounds]);
+  const lignesCoutInPeriod = useMemo(() => lignesCout.filter((l) => {
+    const eq = equipements.find((e) => e.id === l.equipement_id);
+    return eq && inRange(eq.created_at, currentRange);
+  }), [lignesCout, equipements, currentRange]);
 
   const vusIds = useMemo(() => new Set(passagesInPeriod.map((p) => p.equipement_id)), [passagesInPeriod]);
-  const vusIdsPrev = useMemo(() => new Set(passagesPrev.map((p) => p.equipement_id)), [passagesPrev]);
-
   const equipementsActifs = useMemo(
     () => equipements.filter((e) => e.statut === "en_attente" || e.statut === "en_reparation"),
     [equipements]
@@ -133,26 +165,183 @@ export default function RapportsPage() {
     return set;
   }, [equipementsActifs, passages]);
 
-  const kpis = useMemo(() => {
+  // --- KPIs ACTIVITÉ ---
+  const kpisActivite = useMemo(() => {
     const vus = vusIds.size;
-    const vusPrev = vusIdsPrev.size;
-    const deltaVus = vusPrev > 0 ? Math.round(((vus - vusPrev) / vusPrev) * 100) : (vus > 0 ? 100 : 0);
-
     const passagesCount = passagesInPeriod.length;
-    const passagesPrevCount = passagesPrev.length;
-    const deltaPassages = passagesPrevCount > 0 ? Math.round(((passagesCount - passagesPrevCount) / passagesPrevCount) * 100) : (passagesCount > 0 ? 100 : 0);
-
     const nouveaux = equipementsInPeriod.length;
-    const nouveauxPrev = equipementsPrev.length;
-    const deltaNouveaux = nouveauxPrev > 0 ? Math.round(((nouveaux - nouveauxPrev) / nouveauxPrev) * 100) : (nouveaux > 0 ? 100 : 0);
-
     const nonVus = equipementsActifs.filter((e) => !vusIds.has(e.id)).length;
     const totalActifs = equipementsActifs.length;
     const stagnationRate = totalActifs > 0 ? Math.round((stagnantIds.size / totalActifs) * 100) : 0;
+    return { vus, passagesCount, nouveaux, nonVus, stagnationRate };
+  }, [vusIds, passagesInPeriod, equipementsInPeriod, equipementsActifs, stagnantIds]);
 
-    return { vus, deltaVus, passagesCount, deltaPassages, nouveaux, deltaNouveaux, nonVus, stagnationRate };
-  }, [vusIds, vusIdsPrev, passagesInPeriod, passagesPrev, equipementsInPeriod, equipementsPrev, equipementsActifs, stagnantIds]);
+  // --- KPIs PERFORMANCE ---
+  const kpisPerformance = useMemo(() => {
+    const sessionsByEquipement = new Map<string, SessionAnalyse[]>();
+    sessions.forEach((s) => {
+      if (!sessionsByEquipement.has(s.equipement_id)) sessionsByEquipement.set(s.equipement_id, []);
+      sessionsByEquipement.get(s.equipement_id)!.push(s);
+    });
 
+    const analyses = equipementsInPeriod
+      .filter((eq) => isEquipementTermine(eq as EquipementAnalyse))
+      .map((eq) => {
+        const sess = sessionsByEquipement.get(eq.id) || [];
+        const analyse = analyserEquipement(eq as EquipementAnalyse, sess, coefficients);
+        return { eq, analyse };
+      })
+      .filter((x) => x.analyse.temps_reel_jours > 0 && x.analyse.efficacite > 0);
+
+    const efficaciteMoyenne = analyses.length > 0
+      ? Math.round(analyses.reduce((sum, x) => sum + x.analyse.efficacite, 0) / analyses.length)
+      : 0;
+
+    const surDurees = equipementsInPeriod.map((eq) => {
+      const sess = sessionsByEquipement.get(eq.id) || [];
+      const analyse = analyserEquipement(eq as EquipementAnalyse, sess, coefficients);
+      return { eq, analyse };
+    }).filter((x) => x.analyse.est_sur_duree && x.analyse.temps_reel_jours > 0);
+
+    const operateursMap = new Map<string, string>();
+    operateurs.forEach((o) => operateursMap.set(o.id, o.full_name));
+
+    const parOperateur = new Map<string, {
+      equipementsTouches: Set<string>;
+      tempsReelMin: number;
+      tempsAttenduJours: number;
+    }>();
+
+    sessionsInPeriod.forEach((s) => {
+      const eq = equipements.find((e) => e.id === s.equipement_id);
+      if (!eq || !isEquipementTermine(eq as EquipementAnalyse)) return;
+
+      if (!parOperateur.has(s.operateur_id)) {
+        parOperateur.set(s.operateur_id, {
+          equipementsTouches: new Set(),
+          tempsReelMin: 0,
+          tempsAttenduJours: 0,
+        });
+      }
+      const entry = parOperateur.get(s.operateur_id)!;
+      entry.tempsReelMin += calculerTempsTravail(s.started_at, s.ended_at);
+
+      if (!entry.equipementsTouches.has(s.equipement_id)) {
+        entry.equipementsTouches.add(s.equipement_id);
+        const coef = coefficients.find((c) => {
+          const type = (eq.nature_travaux || "").toLowerCase();
+          const matchType = type.includes("rebobinage") || type.includes("bobinage") ? "rebobinage" :
+            type.includes("mecanique") || type.includes("mécanique") ? "mecanique" :
+            type.includes("equilibrage") || type.includes("équilibrage") ? "equilibrage" :
+            type.includes("peinture") ? "peinture" : "revision";
+          return c.type_travail === matchType &&
+            (eq.puissance_kw || 0) >= c.puissance_min &&
+            (eq.puissance_kw || 0) < c.puissance_max;
+        });
+        if (coef) entry.tempsAttenduJours += Number(coef.temps_attendu_jours);
+      }
+    });
+
+    const topOperateurs = Array.from(parOperateur.entries()).map(([opId, data]) => {
+      const tempsReelJours = data.tempsReelMin / (8 * 60);
+      const efficacite = tempsReelJours > 0 && data.tempsAttenduJours > 0
+        ? Math.round((data.tempsAttenduJours / tempsReelJours) * 100)
+        : 0;
+      return {
+        operateur_id: opId,
+        nom: operateursMap.get(opId) || "Inconnu",
+        nb_equipements: data.equipementsTouches.size,
+        temps_reel_jours: Math.round(tempsReelJours * 10) / 10,
+        temps_attendu_jours: Math.round(data.tempsAttenduJours * 10) / 10,
+        efficacite,
+      };
+    }).filter((o) => o.nb_equipements >= SEUIL_MIN_EQUIPEMENTS).sort((a, b) => b.efficacite - a.efficacite);
+
+    return { efficaciteMoyenne, nbTermines: analyses.length, surDurees, topOperateurs };
+  }, [equipementsInPeriod, equipements, sessions, sessionsInPeriod, coefficients, operateurs]);
+
+  // --- KPIs FINANCIER ---
+  const kpisFinancier = useMemo(() => {
+    const totalParType = {
+      piece: 0,
+      sous_traitance: 0,
+      transport: 0,
+      consommable: 0,
+      main_oeuvre: 0,
+    };
+
+    lignesCoutInPeriod.forEach((l) => {
+      const total = Number(l.quantite) * Number(l.prix_unitaire);
+      if (totalParType[l.type_ligne as keyof typeof totalParType] !== undefined) {
+        totalParType[l.type_ligne as keyof typeof totalParType] += total;
+      }
+    });
+
+    const totalHT = Object.values(totalParType).reduce((s, v) => s + v, 0);
+
+    const parEquipement = new Map<string, number>();
+    lignesCoutInPeriod.forEach((l) => {
+      const total = Number(l.quantite) * Number(l.prix_unitaire);
+      parEquipement.set(l.equipement_id, (parEquipement.get(l.equipement_id) || 0) + total);
+    });
+
+    const topEquipementsChers = Array.from(parEquipement.entries())
+      .map(([eqId, total]) => {
+        const eq = equipements.find((e) => e.id === eqId);
+        return { equipement: eq, total };
+      })
+      .filter((x) => x.equipement)
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
+
+    const coutMoyen = parEquipement.size > 0 ? totalHT / parEquipement.size : 0;
+
+    return { totalParType, totalHT, topEquipementsChers, coutMoyen, nbEquipementsAvecCouts: parEquipement.size };
+  }, [lignesCoutInPeriod, equipements]);
+
+  // --- KPIs CLIENT ---
+  const kpisClient = useMemo(() => {
+    const parClient = new Map<string, {
+      nbEquipements: number;
+      nbEnCours: number;
+      nbLivres: number;
+      tempsTotalMin: number;
+      coutTotal: number;
+    }>();
+
+    equipementsInPeriod.forEach((e) => {
+      if (!parClient.has(e.client_name)) {
+        parClient.set(e.client_name, {
+          nbEquipements: 0,
+          nbEnCours: 0,
+          nbLivres: 0,
+          tempsTotalMin: 0,
+          coutTotal: 0,
+        });
+      }
+      const entry = parClient.get(e.client_name)!;
+      entry.nbEquipements += 1;
+      if (e.statut === "livre") entry.nbLivres += 1;
+      else entry.nbEnCours += 1;
+
+      const eqSessions = sessions.filter((s) => s.equipement_id === e.id);
+      eqSessions.forEach((s) => {
+        entry.tempsTotalMin += calculerTempsTravail(s.started_at, s.ended_at);
+      });
+
+      const eqCouts = lignesCout.filter((l) => l.equipement_id === e.id);
+      eqCouts.forEach((l) => {
+        entry.coutTotal += Number(l.quantite) * Number(l.prix_unitaire);
+      });
+    });
+
+    return Array.from(parClient.entries()).map(([clientName, data]) => ({
+      client_name: clientName,
+      ...data,
+    })).sort((a, b) => b.nbEquipements - a.nbEquipements);
+  }, [equipementsInPeriod, sessions, lignesCout]);
+
+  // --- AUTRES STATS ---
   const passagesParMois = useMemo(() => {
     const arr = Array(12).fill(0);
     passages.filter((p) => new Date(p.passage_date).getFullYear() === now.getFullYear())
@@ -160,17 +349,13 @@ export default function RapportsPage() {
     return arr;
   }, [passages, now]);
 
-  // Charge par atelier - fusion des doublons par nom
   const chargeParAtelier = useMemo(() => {
     const map = new Map<string, { id: string; name: string; count: number }>();
     ateliers.forEach((a) => {
       const count = passagesInPeriod.filter((p) => p.atelier_id === a.id).length;
       const existing = map.get(a.name);
-      if (existing) {
-        existing.count += count;
-      } else {
-        map.set(a.name, { id: a.id, name: a.name, count });
-      }
+      if (existing) existing.count += count;
+      else map.set(a.name, { id: a.id, name: a.name, count });
     });
     return Array.from(map.values()).sort((a, b) => b.count - a.count);
   }, [ateliers, passagesInPeriod]);
@@ -183,120 +368,7 @@ export default function RapportsPage() {
     })).filter((t) => t.count > 0).sort((a, b) => b.count - a.count);
   }, [operateurs, passagesInPeriod]);
 
-  const topClients = useMemo(() => {
-    const map: Record<string, number> = {};
-    equipements.forEach((e) => { map[e.client_name] = (map[e.client_name] || 0) + 1; });
-    return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  }, [equipements]);
-
-  const topTypes = useMemo(() => {
-    const map: Record<string, number> = {};
-    equipements.forEach((e) => { map[e.type_equipement] = (map[e.type_equipement] || 0) + 1; });
-    return Object.entries(map).sort((a, b) => b[1] - a[1]).slice(0, 5);
-  }, [equipements]);
-
-  const alertes = useMemo(() => {
-    const list: { type: "danger" | "warning" | "info"; message: string }[] = [];
-
-    if (stagnantIds.size > 0) {
-      list.push({ type: "danger", message: `${stagnantIds.size} equipement(s) stagnant(s) - meme % sur les 3 derniers passages` });
-    }
-
-    const jamaisVus = equipementsActifs.filter((e) => {
-      const hist = passages.filter((p) => p.equipement_id === e.id);
-      const days = Math.floor((now.getTime() - new Date(e.created_at).getTime()) / 86400000);
-      return hist.length === 0 && days > 7;
-    });
-    if (jamaisVus.length > 0) {
-      list.push({ type: "warning", message: `${jamaisVus.length} equipement(s) jamais vu(s) depuis plus de 7 jours` });
-    }
-
-    if (kpis.stagnationRate > 30) {
-      list.push({ type: "warning", message: `Taux de stagnation eleve : ${kpis.stagnationRate}% des actifs` });
-    }
-
-    if (kpis.nonVus > 5) {
-      list.push({ type: "info", message: `${kpis.nonVus} equipement(s) non vu(s) sur la periode` });
-    }
-
-    return list;
-  }, [stagnantIds, equipementsActifs, passages, kpis, now]);
-
-  const equipementsStagnants = useMemo(() => {
-    return equipementsActifs
-      .filter((e) => stagnantIds.has(e.id))
-      .map((e) => {
-        const hist = passages.filter((p) => p.equipement_id === e.id).slice(0, 3);
-        const lastDate = hist[0]?.passage_date;
-        const days = lastDate ? Math.floor((now.getTime() - new Date(lastDate).getTime()) / 86400000) : 0;
-        return { ...e, daysStagnant: days };
-      })
-      .sort((a, b) => b.daysStagnant - a.daysStagnant);
-  }, [equipementsActifs, stagnantIds, passages, now]);
-
-  const progressionParEquipement = useMemo(() => {
-    return Array.from(vusIds).map((id) => {
-      const eq = equipements.find((e) => e.id === id);
-      const obs = passagesInPeriod.filter((p) => p.equipement_id === id).sort((a, b) => a.passage_date.localeCompare(b.passage_date));
-      return {
-        equipement: eq,
-        debut: obs[0]?.pourcentage ?? 0,
-        fin: obs[obs.length - 1]?.pourcentage ?? 0,
-        nbTournees: obs.length,
-      };
-    }).filter((p) => p.equipement);
-  }, [vusIds, equipements, passagesInPeriod]);
-
-  const progressionMoyenne = progressionParEquipement.length > 0
-    ? Math.round(progressionParEquipement.reduce((s, p) => s + (p.fin - p.debut), 0) / progressionParEquipement.length)
-    : 0;
-
-  // --- SECTIONS PDF ---
-  const buildSections = (): { heading: string; rows: [string, string][] }[] => [
-    {
-      heading: "Synthese de la periode",
-      rows: [
-        ["Indicateur", "Valeur"] as [string, string],
-        ["Equipements vus", String(kpis.vus)],
-        ["Total passages", String(kpis.passagesCount)],
-        ["Nouveaux equipements", String(kpis.nouveaux)],
-        ["Equipements non vus", String(kpis.nonVus)],
-        ["Taux de stagnation", `${kpis.stagnationRate}%`],
-        ["Progression moyenne", `${progressionMoyenne > 0 ? "+" : ""}${progressionMoyenne}%`],
-      ],
-    },
-    {
-      heading: "Charge par atelier",
-      rows: [["Atelier", "Passages"] as [string, string], ...chargeParAtelier.map((a) => [a.name, String(a.count)] as [string, string])],
-    },
-    {
-      heading: "Charge par operateur",
-      rows: [["Operateur", "Passages"] as [string, string], ...chargeParOperateur.map((t) => [t.name, String(t.count)] as [string, string])],
-    },
-    {
-      heading: "Equipements stagnants",
-      rows: [
-        ["Equipement", "Jours stagnants"] as [string, string],
-        ...equipementsStagnants.map((e) => [`${e.code_faratec || "-"} - ${e.client_name}`, `${e.daysStagnant}j`] as [string, string]),
-      ],
-    },
-    {
-      heading: "Progression par equipement",
-      rows: [
-        ["Equipement", "Debut -> Fin"] as [string, string],
-        ...progressionParEquipement.map((p) => [`${p.equipement?.code_faratec || "-"} - ${p.equipement?.client_name}`, `${p.debut}% -> ${p.fin}% (${p.nbTournees})`] as [string, string]),
-      ],
-    },
-    {
-      heading: "Top 5 clients",
-      rows: [["Client", "Equipements"] as [string, string], ...topClients.map(([c, n]) => [c, String(n)] as [string, string])],
-    },
-    {
-      heading: "Top 5 types d'equipement",
-      rows: [["Type", "Nombre"] as [string, string], ...topTypes.map(([t, n]) => [t, String(n)] as [string, string])],
-    },
-  ];
-
+  // --- PDF ---
   const handleDownloadPdf = async () => {
     setDownloading(true);
     try {
@@ -304,9 +376,9 @@ export default function RapportsPage() {
       const periodLabel = currentRange.label;
 
       const kpiList = [
-        { label: "Vus", value: String(kpis.vus), color: [245, 158, 11] as [number, number, number] },
-        { label: "Passages", value: String(kpis.passagesCount), color: [37, 99, 235] as [number, number, number] },
-        { label: "Nouveaux", value: String(kpis.nouveaux), color: [22, 163, 74] as [number, number, number] },
+        { label: "Vus", value: String(kpisActivite.vus), color: [245, 158, 11] as [number, number, number] },
+        { label: "Passages", value: String(kpisActivite.passagesCount), color: [37, 99, 235] as [number, number, number] },
+        { label: "Nouveaux", value: String(kpisActivite.nouveaux), color: [22, 163, 74] as [number, number, number] },
         { label: "Stagnants", value: String(stagnantIds.size), color: [220, 38, 38] as [number, number, number] },
       ];
 
@@ -321,7 +393,64 @@ export default function RapportsPage() {
         },
       ];
 
-      const doc = await buildRapportPdf(title, periodLabel, buildSections(), kpiList, charts);
+      const sections: { heading: string; rows: [string, string][] }[] = [
+        {
+          heading: "Synthese activite",
+          rows: [
+            ["Indicateur", "Valeur"] as [string, string],
+            ["Equipements vus", String(kpisActivite.vus)],
+            ["Total passages", String(kpisActivite.passagesCount)],
+            ["Nouveaux equipements", String(kpisActivite.nouveaux)],
+            ["Equipements non vus", String(kpisActivite.nonVus)],
+            ["Taux de stagnation", `${kpisActivite.stagnationRate}%`],
+          ],
+        },
+        {
+          heading: "Performance",
+          rows: [
+            ["Indicateur", "Valeur"] as [string, string],
+            ["Efficacite moyenne", `${kpisPerformance.efficaciteMoyenne}%`],
+            ["Equipements termines", String(kpisPerformance.nbTermines)],
+            ["Sur-durees detectees", String(kpisPerformance.surDurees.length)],
+          ],
+        },
+        {
+          heading: "Top operateurs",
+          rows: [
+            ["Operateur", "Efficacite"] as [string, string],
+            ...kpisPerformance.topOperateurs.slice(0, 10).map((o) => [`${o.nom} (${o.nb_equipements} eq.)`, `${o.efficacite}%`] as [string, string]),
+          ],
+        },
+        {
+          heading: "Repartition financiere",
+          rows: [
+            ["Categorie", "Montant HT"] as [string, string],
+            ["Pieces de rechange", `${kpisFinancier.totalParType.piece.toFixed(2)} DH`],
+            ["Main d'oeuvre", `${kpisFinancier.totalParType.main_oeuvre.toFixed(2)} DH`],
+            ["Sous-traitance", `${kpisFinancier.totalParType.sous_traitance.toFixed(2)} DH`],
+            ["Transport", `${kpisFinancier.totalParType.transport.toFixed(2)} DH`],
+            ["Consommables", `${kpisFinancier.totalParType.consommable.toFixed(2)} DH`],
+            ["TOTAL", `${kpisFinancier.totalHT.toFixed(2)} DH`],
+          ],
+        },
+        {
+          heading: "Stats par client",
+          rows: [
+            ["Client", "Nb equipements"] as [string, string],
+            ...kpisClient.slice(0, 20).map((c) => [`${c.client_name} (${c.nbEnCours} en cours)`, String(c.nbEquipements)] as [string, string]),
+          ],
+        },
+        {
+          heading: "Charge par atelier",
+          rows: [["Atelier", "Passages"] as [string, string], ...chargeParAtelier.map((a) => [a.name, String(a.count)] as [string, string])],
+        },
+        {
+          heading: "Charge par operateur",
+          rows: [["Operateur", "Passages"] as [string, string], ...chargeParOperateur.map((t) => [t.name, String(t.count)] as [string, string])],
+        },
+      ];
+
+      const doc = await buildRapportPdf(title, periodLabel, sections, kpiList, charts);
       doc.save(`FARATEC_${title.replace(/\s/g, "_")}_${todayStr}.pdf`);
     } finally {
       setDownloading(false);
@@ -333,21 +462,29 @@ export default function RapportsPage() {
       ["FARATEC - Rapport"],
       [currentRange.label],
       [],
-      ["Indicateur", "Valeur"],
-      ["Equipements vus", String(kpis.vus)],
-      ["Total passages", String(kpis.passagesCount)],
-      ["Nouveaux equipements", String(kpis.nouveaux)],
-      ["Equipements non vus", String(kpis.nonVus)],
-      ["Taux de stagnation", `${kpis.stagnationRate}%`],
+      ["ACTIVITE"],
+      ["Equipements vus", String(kpisActivite.vus)],
+      ["Total passages", String(kpisActivite.passagesCount)],
+      ["Nouveaux", String(kpisActivite.nouveaux)],
+      ["Non vus", String(kpisActivite.nonVus)],
       [],
+      ["PERFORMANCE"],
+      ["Efficacite moyenne", `${kpisPerformance.efficaciteMoyenne}%`],
+      ["Equipements termines", String(kpisPerformance.nbTermines)],
+      ["Sur-durees", String(kpisPerformance.surDurees.length)],
+      [],
+      ["FINANCIER"],
+      ["Pieces", `${kpisFinancier.totalParType.piece.toFixed(2)} DH`],
+      ["Main d'oeuvre", `${kpisFinancier.totalParType.main_oeuvre.toFixed(2)} DH`],
+      ["Sous-traitance", `${kpisFinancier.totalParType.sous_traitance.toFixed(2)} DH`],
+      ["Transport", `${kpisFinancier.totalParType.transport.toFixed(2)} DH`],
+      ["Consommables", `${kpisFinancier.totalParType.consommable.toFixed(2)} DH`],
+      ["TOTAL", `${kpisFinancier.totalHT.toFixed(2)} DH`],
+      [],
+      ["CLIENTS"],
+      ["Client", "Nb equipements", "En cours", "Livres"],
+      ...kpisClient.map((c) => [c.client_name, String(c.nbEquipements), String(c.nbEnCours), String(c.nbLivres)]),
     ];
-
-    buildSections().forEach((s) => {
-      rows.push([s.heading]);
-      s.rows.forEach((r) => rows.push([r[0], r[1]]));
-      rows.push([]);
-    });
-
     buildCsv(rows, `FARATEC_Rapport_${todayStr}.csv`);
   };
 
@@ -359,47 +496,37 @@ export default function RapportsPage() {
     { key: "custom", label: "Personnalise", icon: Target },
   ];
 
+  const mainTabs: { key: "activite" | "performance" | "financier" | "client"; label: string; icon: any }[] = [
+    { key: "activite", label: "Activite", icon: Activity },
+    { key: "performance", label: "Performance", icon: Gauge },
+    { key: "financier", label: "Financier", icon: Coins },
+    { key: "client", label: "Client", icon: Users },
+  ];
+
   const moisLabels = ["Jan", "Fev", "Mar", "Avr", "Mai", "Jun", "Juil", "Aou", "Sep", "Oct", "Nov", "Dec"];
 
-  const deltaBadge = (delta: number) => {
-    if (delta === 0) return null;
-    const isUp = delta > 0;
-    return (
-      <span className={`inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full ${isUp ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
-        {isUp ? <TrendingUp size={10} /> : <TrendingDown size={10} />}
-        {isUp ? "+" : ""}{delta}%
-      </span>
-    );
-  };
+  if (loading) {
+    return <p className="text-sm text-slate-400 p-6">Chargement...</p>;
+  }
 
   return (
-    <div className="space-y-6">
-      {/* --- EN-TETE --- */}
+    <div className="space-y-5">
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-slate-800">Rapports & Analyses</h1>
-          <p className="text-sm text-slate-500">Tableau de bord decisionnel - {currentRange.label}</p>
+          <p className="text-sm text-slate-500">{currentRange.label}</p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleExportCsv}
-            disabled={loading}
-            className="flex items-center gap-1.5 text-sm font-medium rounded-lg px-3 py-2 bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 disabled:opacity-50 shadow-sm"
-          >
+          <button onClick={handleExportCsv} className="flex items-center gap-1.5 text-sm font-medium rounded-lg px-3 py-2 bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 shadow-sm">
             <FileSpreadsheet size={14} /> CSV
           </button>
-          <button
-            onClick={handleDownloadPdf}
-            disabled={downloading || loading}
-            className="flex items-center gap-1.5 text-sm font-medium rounded-lg px-4 py-2 bg-neutral-900 text-amber-500 hover:bg-neutral-800 disabled:opacity-50 shadow-sm"
-          >
+          <button onClick={handleDownloadPdf} disabled={downloading} className="flex items-center gap-1.5 text-sm font-medium rounded-lg px-4 py-2 bg-neutral-900 text-amber-500 hover:bg-neutral-800 disabled:opacity-50 shadow-sm">
             <FileDown size={14} />
             {downloading ? "Generation..." : "Telecharger PDF"}
           </button>
         </div>
       </div>
 
-      {/* --- ONGLETS --- */}
       <div className="flex flex-wrap gap-2">
         {periodTabs.map((p) => (
           <button
@@ -415,7 +542,6 @@ export default function RapportsPage() {
         ))}
       </div>
 
-      {/* --- CUSTOM --- */}
       {period === "custom" && (
         <div className="bg-white rounded-xl p-4 shadow-sm flex flex-wrap items-center gap-3">
           <label className="text-xs font-medium text-slate-600 flex items-center gap-2">
@@ -429,68 +555,43 @@ export default function RapportsPage() {
         </div>
       )}
 
-      {loading ? (
-        <p className="text-sm text-slate-400">Chargement...</p>
-      ) : (
-        <>
-          {/* --- ALERTES --- */}
-          {alertes.length > 0 && (
-            <div className="space-y-2">
-              {alertes.map((a, i) => (
-                <div
-                  key={i}
-                  className={`flex items-start gap-2 rounded-xl p-3 border-l-4 shadow-sm ${
-                    a.type === "danger" ? "bg-red-50 border-red-500" :
-                    a.type === "warning" ? "bg-amber-50 border-amber-500" :
-                    "bg-blue-50 border-blue-500"
-                  }`}
-                >
-                  <AlertTriangle size={16} className={
-                    a.type === "danger" ? "text-red-600" :
-                    a.type === "warning" ? "text-amber-600" : "text-blue-600"
-                  } />
-                  <p className={`text-sm font-medium ${
-                    a.type === "danger" ? "text-red-800" :
-                    a.type === "warning" ? "text-amber-800" : "text-blue-800"
-                  }`}>{a.message}</p>
-                </div>
-              ))}
-            </div>
-          )}
+      <div className="flex flex-wrap gap-2 bg-slate-100 p-1 rounded-xl w-fit">
+        {mainTabs.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setMainTab(t.key)}
+            className={`flex items-center gap-1.5 text-sm font-semibold rounded-lg px-4 py-2 transition ${
+              mainTab === t.key ? "bg-white text-slate-800 shadow-sm" : "text-slate-600 hover:text-slate-800"
+            }`}
+          >
+            <t.icon size={14} />
+            {t.label}
+          </button>
+        ))}
+      </div>
 
-          {/* --- KPIs --- */}
+      {/* ACTIVITE */}
+      {mainTab === "activite" && (
+        <>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-amber-500">
               <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Equipements vus</p>
-              <div className="flex items-center justify-between mt-1">
-                <p className="text-2xl font-bold text-slate-800">{kpis.vus}</p>
-                {deltaBadge(kpis.deltaVus)}
-              </div>
+              <p className="text-2xl font-bold text-slate-800">{kpisActivite.vus}</p>
             </div>
             <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-blue-500">
               <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Passages</p>
-              <div className="flex items-center justify-between mt-1">
-                <p className="text-2xl font-bold text-slate-800">{kpis.passagesCount}</p>
-                {deltaBadge(kpis.deltaPassages)}
-              </div>
+              <p className="text-2xl font-bold text-slate-800">{kpisActivite.passagesCount}</p>
             </div>
             <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-green-500">
               <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Nouveaux</p>
-              <div className="flex items-center justify-between mt-1">
-                <p className="text-2xl font-bold text-slate-800">{kpis.nouveaux}</p>
-                {deltaBadge(kpis.deltaNouveaux)}
-              </div>
+              <p className="text-2xl font-bold text-slate-800">{kpisActivite.nouveaux}</p>
             </div>
             <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-red-500">
               <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Taux stagnation</p>
-              <div className="flex items-center justify-between mt-1">
-                <p className="text-2xl font-bold text-slate-800">{kpis.stagnationRate}%</p>
-                <span className="text-[10px] text-slate-400">{stagnantIds.size}/{equipementsActifs.length}</span>
-              </div>
+              <p className="text-2xl font-bold text-slate-800">{kpisActivite.stagnationRate}%</p>
             </div>
           </div>
 
-          {/* --- GRAPHIQUE PASSAGES PAR MOIS --- */}
           <div className="bg-white rounded-xl p-5 shadow-sm">
             <div className="flex items-center gap-2 mb-4">
               <Activity size={16} className="text-amber-600" />
@@ -502,10 +603,7 @@ export default function RapportsPage() {
                 return (
                   <div key={i} className="flex-1 flex flex-col items-center gap-1">
                     <span className="text-[10px] text-slate-500 font-semibold">{count > 0 ? count : ""}</span>
-                    <div
-                      className="w-full bg-gradient-to-t from-amber-400 to-amber-500 rounded-t transition-all hover:from-amber-500 hover:to-amber-600"
-                      style={{ height: `${(count / max) * 100}%`, minHeight: count > 0 ? "4px" : "2px" }}
-                    />
+                    <div className="w-full bg-gradient-to-t from-amber-400 to-amber-500 rounded-t" style={{ height: `${(count / max) * 100}%`, minHeight: count > 0 ? "4px" : "2px" }} />
                     <span className="text-[10px] text-slate-400">{moisLabels[i]}</span>
                   </div>
                 );
@@ -513,96 +611,121 @@ export default function RapportsPage() {
             </div>
           </div>
 
-          {/* --- CHARGE PAR ATELIER + OPÉRATEUR --- */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="bg-white rounded-xl p-5 shadow-sm">
               <div className="flex items-center gap-2 mb-4">
                 <Factory size={16} className="text-amber-600" />
                 <h2 className="font-semibold text-slate-700 text-sm">Charge par atelier</h2>
               </div>
-              {chargeParAtelier.every((a) => a.count === 0) ? (
-                <p className="text-sm text-slate-400">Aucun passage sur la periode.</p>
-              ) : (
-                <div className="space-y-2">
-                  {chargeParAtelier.filter((a) => a.count > 0).map((a) => {
-                    const max = Math.max(...chargeParAtelier.map((x) => x.count), 1);
-                    return (
-                      <div key={a.id} className="space-y-1">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-slate-700 font-medium">{a.name}</span>
-                          <span className="font-bold text-slate-800">{a.count}</span>
-                        </div>
-                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                          <div className="h-full bg-amber-500 rounded-full" style={{ width: `${(a.count / max) * 100}%` }} />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+              {chargeParAtelier.filter((a) => a.count > 0).map((a) => {
+                const max = Math.max(...chargeParAtelier.map((x) => x.count), 1);
+                return (
+                  <div key={a.id} className="space-y-1 mb-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-700 font-medium">{a.name}</span>
+                      <span className="font-bold text-slate-800">{a.count}</span>
+                    </div>
+                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                      <div className="h-full bg-amber-500 rounded-full" style={{ width: `${(a.count / max) * 100}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
             <div className="bg-white rounded-xl p-5 shadow-sm">
               <div className="flex items-center gap-2 mb-4">
                 <Users size={16} className="text-amber-600" />
                 <h2 className="font-semibold text-slate-700 text-sm">Charge par operateur</h2>
               </div>
-              {chargeParOperateur.length === 0 ? (
-                <p className="text-sm text-slate-400">Aucun passage sur la periode.</p>
-              ) : (
-                <div className="space-y-2">
-                  {chargeParOperateur.map((t) => {
-                    const max = Math.max(...chargeParOperateur.map((x) => x.count), 1);
-                    return (
-                      <div key={t.id} className="space-y-1">
-                        <div className="flex items-center justify-between text-sm">
-                          <span className="text-slate-700 font-medium">{t.name}</span>
-                          <span className="font-bold text-slate-800">{t.count}</span>
-                        </div>
-                        <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                          <div className="h-full bg-blue-500 rounded-full" style={{ width: `${(t.count / max) * 100}%` }} />
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+              {chargeParOperateur.map((t) => {
+                const max = Math.max(...chargeParOperateur.map((x) => x.count), 1);
+                return (
+                  <div key={t.id} className="space-y-1 mb-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-700 font-medium">{t.name}</span>
+                      <span className="font-bold text-slate-800">{t.count}</span>
+                    </div>
+                    <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+                      <div className="h-full bg-blue-500 rounded-full" style={{ width: `${(t.count / max) * 100}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* PERFORMANCE */}
+      {mainTab === "performance" && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-emerald-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <Target size={10} /> Efficacite moyenne
+              </p>
+              <div className="flex items-center justify-between mt-1">
+                <p className="text-2xl font-bold text-slate-800">{kpisPerformance.efficaciteMoyenne}%</p>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${getEfficaciteColor(kpisPerformance.efficaciteMoyenne).bg} ${getEfficaciteColor(kpisPerformance.efficaciteMoyenne).text}`}>
+                  {getEfficaciteColor(kpisPerformance.efficaciteMoyenne).label}
+                </span>
+              </div>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-green-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <CheckCircle2 size={10} /> Equipements termines
+              </p>
+              <p className="text-2xl font-bold text-slate-800">{kpisPerformance.nbTermines}</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-red-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <AlertTriangle size={10} /> Sur-durees
+              </p>
+              <p className="text-2xl font-bold text-slate-800">{kpisPerformance.surDurees.length}</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-blue-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <Users size={10} /> Top operateurs
+              </p>
+              <p className="text-2xl font-bold text-slate-800">{kpisPerformance.topOperateurs.length}</p>
             </div>
           </div>
 
-          {/* --- PROGRESSION --- */}
-          <div className="bg-white rounded-xl p-5 shadow-sm">
-            <div className="flex items-center gap-2 mb-4">
-              <TrendingUp size={16} className="text-amber-600" />
-              <h2 className="font-semibold text-slate-700 text-sm">Progression des equipements sur la periode</h2>
-              <span className="ml-auto text-xs text-slate-500">
-                Moyenne :{" "}
-                <strong className={progressionMoyenne > 0 ? "text-green-600" : progressionMoyenne < 0 ? "text-red-600" : "text-slate-600"}>
-                  {progressionMoyenne > 0 ? "+" : ""}{progressionMoyenne}%
-                </strong>
-              </span>
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-emerald-50 to-white">
+              <h2 className="font-semibold text-emerald-800 text-sm flex items-center gap-2">
+                <Award size={16} />
+                Top operateurs par efficacite ({kpisPerformance.topOperateurs.length})
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">Minimum {SEUIL_MIN_EQUIPEMENTS} equipements termines</p>
             </div>
-            {progressionParEquipement.length === 0 ? (
-              <p className="text-sm text-slate-400 text-center py-4">Aucune observation sur la periode.</p>
+            {kpisPerformance.topOperateurs.length === 0 ? (
+              <div className="p-8 text-center">
+                <Users size={32} className="mx-auto text-slate-300 mb-2" />
+                <p className="text-sm text-slate-400">Aucun operateur classe sur cette periode.</p>
+              </div>
             ) : (
               <div className="divide-y divide-slate-100">
-                {progressionParEquipement.map((p) => {
-                  const delta = p.fin - p.debut;
+                {kpisPerformance.topOperateurs.map((op, i) => {
+                  const color = getEfficaciteColor(op.efficacite);
+                  const podium = ["bg-amber-500 text-white", "bg-slate-300 text-slate-800", "bg-amber-700 text-white"];
                   return (
-                    <div key={p.equipement!.id} className="py-2 flex items-center justify-between text-sm">
-                      <span className="text-slate-800">
-                        {p.equipement!.code_faratec || "-"} - {p.equipement!.client_name}
+                    <div key={op.operateur_id} className="p-4 flex items-center gap-3">
+                      <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${i < 3 ? podium[i] : "bg-slate-100 text-slate-600"}`}>
+                        {i + 1}
                       </span>
-                      <span className="flex items-center gap-2">
-                        <span className="text-slate-500">{p.debut}%</span>
-                        <span className="text-slate-400">{"->"}</span>
-                        <span className="font-bold text-amber-700">{p.fin}%</span>
-                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
-                          delta > 0 ? "bg-green-100 text-green-700" : delta < 0 ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-500"
-                        }`}>
-                          {delta > 0 ? "+" : ""}{delta}%
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-semibold text-slate-800 truncate">{op.nom}</p>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          {op.nb_equipements} equipement{op.nb_equipements > 1 ? "s" : ""} · {op.temps_reel_jours}j reel / {op.temps_attendu_jours}j attendu
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <p className={`text-lg font-bold ${color.text}`}>{op.efficacite}%</p>
+                        <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold ${color.bg} ${color.text}`}>
+                          {color.label}
                         </span>
-                        <span className="text-[10px] text-slate-400">({p.nbTournees})</span>
-                      </span>
+                      </div>
                     </div>
                   );
                 })}
@@ -610,83 +733,180 @@ export default function RapportsPage() {
             )}
           </div>
 
-          {/* --- STAGNANTS --- */}
-          {equipementsStagnants.length > 0 && (
+          {kpisPerformance.surDurees.length > 0 && (
             <div className="bg-white rounded-xl p-5 shadow-sm border-l-4 border-red-500">
-              <div className="flex items-center gap-2 mb-4">
+              <h2 className="font-semibold text-red-800 text-sm mb-4 flex items-center gap-2">
                 <AlertTriangle size={16} className="text-red-500" />
-                <h2 className="font-semibold text-slate-700 text-sm">Equipements stagnants ({equipementsStagnants.length})</h2>
-              </div>
+                Equipements en sur-duree ({kpisPerformance.surDurees.length})
+              </h2>
               <div className="divide-y divide-slate-100">
-                {equipementsStagnants.map((e) => (
-                  <div key={e.id} className="py-2 flex items-center justify-between text-sm">
-                    <span className="text-slate-800">{e.code_faratec || "-"} - {e.client_name}</span>
-                    <div className="flex items-center gap-2">
-                      <span className="font-semibold text-amber-700">{e.pourcentage_global}%</span>
-                      <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1">
-                        <Clock size={9} /> {e.daysStagnant}j
+                {kpisPerformance.surDurees.slice(0, 10).map(({ eq, analyse }) => (
+                  <div key={eq.id} className="py-2 flex items-center justify-between text-sm">
+                    <span className="text-slate-800">
+                      <strong>{eq.code_faratec || "—"}</strong> · {eq.client_name}
+                      <span className="text-slate-400 text-xs"> ({getTranchePuissance(eq.puissance_kw)})</span>
+                    </span>
+                    <span className="flex items-center gap-2">
+                      <span className="text-slate-500">{analyse.temps_reel_jours}j</span>
+                      <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold">
+                        +{analyse.depassement_pourcentage}%
                       </span>
-                    </div>
+                    </span>
                   </div>
                 ))}
               </div>
             </div>
           )}
+        </>
+      )}
 
-          {/* --- TOP 5 --- */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="bg-white rounded-xl p-5 shadow-sm">
-              <div className="flex items-center gap-2 mb-4">
-                <Award size={16} className="text-amber-600" />
-                <h2 className="font-semibold text-slate-700 text-sm">Top 5 clients</h2>
-              </div>
-              {topClients.length === 0 ? (
-                <p className="text-sm text-slate-400">Aucun client.</p>
-              ) : (
-                <div className="space-y-2">
-                  {topClients.map(([client, count], i) => (
-                    <div key={client} className="flex items-center gap-3 text-sm">
-                      <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                        i === 0 ? "bg-amber-500 text-white" :
-                        i === 1 ? "bg-slate-300 text-slate-700" :
-                        i === 2 ? "bg-amber-700 text-white" :
-                        "bg-slate-100 text-slate-500"
-                      }`}>
-                        {i + 1}
-                      </span>
-                      <span className="flex-1 text-slate-700 truncate">{client}</span>
-                      <span className="font-semibold text-slate-800">{count}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+      {/* FINANCIER */}
+      {mainTab === "financier" && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-amber-500 col-span-2">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <Coins size={10} /> Total HT
+              </p>
+              <p className="text-2xl font-bold text-slate-800">{kpisFinancier.totalHT.toFixed(2)} DH</p>
+              <p className="text-[10px] text-slate-400 mt-1">{kpisFinancier.nbEquipementsAvecCouts} equipements avec couts</p>
             </div>
-            <div className="bg-white rounded-xl p-5 shadow-sm">
-              <div className="flex items-center gap-2 mb-4">
-                <Package size={16} className="text-amber-600" />
-                <h2 className="font-semibold text-slate-700 text-sm">Top 5 types d'equipement</h2>
-              </div>
-              {topTypes.length === 0 ? (
-                <p className="text-sm text-slate-400">Aucun type.</p>
-              ) : (
-                <div className="space-y-2">
-                  {topTypes.map(([type, count], i) => (
-                    <div key={type} className="flex items-center gap-3 text-sm">
-                      <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                        i === 0 ? "bg-amber-500 text-white" :
-                        i === 1 ? "bg-slate-300 text-slate-700" :
-                        i === 2 ? "bg-amber-700 text-white" :
-                        "bg-slate-100 text-slate-500"
-                      }`}>
-                        {i + 1}
-                      </span>
-                      <span className="flex-1 text-slate-700 truncate">{type}</span>
-                      <span className="font-semibold text-slate-800">{count}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-emerald-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Cout moyen</p>
+              <p className="text-2xl font-bold text-slate-800">{kpisFinancier.coutMoyen.toFixed(0)} DH</p>
             </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-blue-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Lignes de cout</p>
+              <p className="text-2xl font-bold text-slate-800">{lignesCoutInPeriod.length}</p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl p-5 shadow-sm">
+            <h2 className="font-semibold text-slate-700 text-sm mb-4 flex items-center gap-2">
+              <Coins size={16} className="text-amber-600" />
+              Repartition par categorie
+            </h2>
+            <div className="space-y-3">
+              {[
+                { key: "piece", label: "Pieces de rechange", icon: Package, color: "bg-blue-500" },
+                { key: "main_oeuvre", label: "Main d'oeuvre", icon: Users, color: "bg-red-500" },
+                { key: "sous_traitance", label: "Sous-traitance", icon: Wrench, color: "bg-purple-500" },
+                { key: "transport", label: "Transport", icon: Truck, color: "bg-amber-500" },
+                { key: "consommable", label: "Consommables", icon: Droplet, color: "bg-teal-500" },
+              ].map((cat) => {
+                const Icon = cat.icon;
+                const montant = kpisFinancier.totalParType[cat.key as keyof typeof kpisFinancier.totalParType];
+                const pct = kpisFinancier.totalHT > 0 ? (montant / kpisFinancier.totalHT) * 100 : 0;
+                return (
+                  <div key={cat.key} className="space-y-1">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-slate-700 font-medium flex items-center gap-1.5">
+                        <Icon size={12} className="text-slate-500" />
+                        {cat.label}
+                      </span>
+                      <span className="font-bold text-slate-800">{montant.toFixed(2)} DH <span className="text-xs text-slate-400">({pct.toFixed(1)}%)</span></span>
+                    </div>
+                    <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                      <div className={`h-full ${cat.color} rounded-full`} style={{ width: `${pct}%` }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {kpisFinancier.topEquipementsChers.length > 0 && (
+            <div className="bg-white rounded-xl p-5 shadow-sm">
+              <h2 className="font-semibold text-slate-700 text-sm mb-4 flex items-center gap-2">
+                <TrendingUp size={16} className="text-amber-600" />
+                Top 10 equipements les plus chers
+              </h2>
+              <div className="divide-y divide-slate-100">
+                {kpisFinancier.topEquipementsChers.map((x, i) => (
+                  <div key={x.equipement?.id} className="py-2 flex items-center gap-3 text-sm">
+                    <span className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
+                      i === 0 ? "bg-amber-500 text-white" :
+                      i === 1 ? "bg-slate-300 text-slate-700" :
+                      i === 2 ? "bg-amber-700 text-white" :
+                      "bg-slate-100 text-slate-500"
+                    }`}>{i + 1}</span>
+                    <span className="flex-1 text-slate-800 truncate">
+                      <strong>{x.equipement?.code_faratec || "—"}</strong> · {x.equipement?.client_name}
+                    </span>
+                    <span className="font-bold text-amber-700 shrink-0">{x.total.toFixed(2)} DH</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* CLIENT */}
+      {mainTab === "client" && (
+        <>
+          <div className="bg-white rounded-xl p-4 shadow-sm flex items-start gap-2">
+            <Info size={14} className="text-blue-600 shrink-0 mt-0.5" />
+            <p className="text-xs text-blue-800">
+              <strong>Info :</strong> Statistiques globales par client sur la periode. Pour un rapport PDF detaille d'un client, utilisez la page <strong>Vue Client</strong>.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-slate-400">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Clients</p>
+              <p className="text-2xl font-bold text-slate-800">{kpisClient.length}</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-blue-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Equipements</p>
+              <p className="text-2xl font-bold text-slate-800">{kpisClient.reduce((s, c) => s + c.nbEquipements, 0)}</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-amber-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">En cours</p>
+              <p className="text-2xl font-bold text-slate-800">{kpisClient.reduce((s, c) => s + c.nbEnCours, 0)}</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-green-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Livres</p>
+              <p className="text-2xl font-bold text-slate-800">{kpisClient.reduce((s, c) => s + c.nbLivres, 0)}</p>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
+              <h2 className="font-semibold text-slate-700 text-sm flex items-center gap-2">
+                <Users size={16} className="text-amber-600" />
+                Statistiques par client ({kpisClient.length})
+              </h2>
+            </div>
+            {kpisClient.length === 0 ? (
+              <div className="p-8 text-center">
+                <Users size={32} className="mx-auto text-slate-300 mb-2" />
+                <p className="text-sm text-slate-400">Aucun client sur cette periode.</p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {kpisClient.map((c, i) => (
+                  <div key={c.client_name} className="p-4 flex items-center gap-3">
+                    <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
+                      i === 0 ? "bg-amber-500 text-white" :
+                      i === 1 ? "bg-slate-300 text-slate-700" :
+                      i === 2 ? "bg-amber-700 text-white" :
+                      "bg-slate-100 text-slate-500"
+                    }`}>{i + 1}</span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold text-slate-800 truncate">{c.client_name}</p>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        {c.nbEnCours} en cours · {c.nbLivres} livre{c.nbLivres > 1 ? "s" : ""} · {Math.round(c.tempsTotalMin / 60)}h de travail
+                      </p>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-lg font-bold text-amber-700">{c.nbEquipements}</p>
+                      <p className="text-[9px] text-slate-500 font-bold uppercase">Equipements</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </>
       )}

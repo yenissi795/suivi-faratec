@@ -2,6 +2,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "./context/AuthContext";
 import ParametresPage from "./pages/ParametresPage";
 import TempsOperateursPage from "./pages/TempsOperateursPage";
+import OptimisationPage from "./pages/OptimisationPage";
 
 // --- IMPORTS DES PAGES ---
 import VueClientPage from "./pages/VueClientPage";
@@ -46,6 +47,7 @@ export default function App() {
         <Route path="/temps-operateurs" element={<TempsOperateursPage />} />
         <Route path="/vue-client" element={<VueClientPage />} />
         <Route path="/couts" element={<CoutsPage />} />
+        <Route path="/optimisation" element={<OptimisationPage />} />
       </Route>
       
       {/* Si connecté, /auth renvoie vers l'accueil */}

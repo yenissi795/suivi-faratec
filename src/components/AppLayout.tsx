@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import {
   Home, Package, Users, ClipboardList, FileBarChart, LogOut, Menu, X,
-  Factory, Gauge, ArrowLeft, Settings, Timer, Calculator, Eye,
+  Factory, Gauge, ArrowLeft, Settings, Timer, Calculator, Eye, TrendingUp,
 } from "lucide-react";
 import logo from "../assets/logo-faratec.png";
 
@@ -16,7 +16,8 @@ const links = [
   { to: "/operateurs", label: "Opérateurs", icon: Users },
   { to: "/temps-operateurs", label: "Temps opérateurs", icon: Timer },
   { to: "/couts", label: "Coûts", icon: Calculator },  
-  { to: "/vue-client", label: "Vue Client", icon: Eye },                  // ← AJOUT
+  { to: "/vue-client", label: "Vue Client", icon: Eye },
+  { to: "/optimisation", label: "Optimisation", icon: TrendingUp },                  // ← AJOUT
   { to: "/rapports", label: "Rapports", icon: FileBarChart },
   { to: "/parametres", label: "Paramètres", icon: Settings },
 ];

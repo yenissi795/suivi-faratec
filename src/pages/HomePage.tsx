@@ -5,6 +5,10 @@ import tileEquipements from "../assets/tile-equipements.jpg";
 import tileAteliers from "../assets/tile-ateliers.jpg";
 import tileTechniciens from "../assets/tile-techniciens.jpg";
 import tileRapports from "../assets/tile-rapports.jpg";
+import tileCouts from "../assets/tile-couts.jpg";
+import tileOptimisation from "../assets/tile-optimisation.jpg";
+import tileTempsOperateurs from "../assets/tile-temps-operateurs.jpg";
+import tileVueClient from "../assets/tile-vue-client.jpg";
 
 const modules = [
   { to: "/dashboard", label: "Tableau de bord", image: tileDashboard },
@@ -12,12 +16,19 @@ const modules = [
   { to: "/equipements", label: "Équipements", image: tileEquipements },
   { to: "/ateliers", label: "Ateliers", image: tileAteliers },
   { to: "/operateurs", label: "Opérateurs", image: tileTechniciens },
+  { to: "/temps-operateurs", label: "Temps opérateurs", image: tileTempsOperateurs },
+  { to: "/couts", label: "Coûts", image: tileCouts },
+  { to: "/optimisation", label: "Optimisation", image: tileOptimisation },
+  { to: "/vue-client", label: "Vue Client", image: tileVueClient },
   { to: "/rapports", label: "Rapports", image: tileRapports },
 ];
 
 function Tile({ to, label, image }: { to: string; label: string; image: string }) {
   return (
-    <Link to={to} className="group relative aspect-square rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-shadow border-b-4 border-amber-500">
+    <Link
+      to={to}
+      className="group relative aspect-square rounded-xl overflow-hidden shadow-sm hover:shadow-md transition-shadow border-b-4 border-amber-500"
+    >
       <img
         src={image}
         alt={label}
@@ -36,12 +47,17 @@ export default function HomePage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-bold text-slate-800 capitalize">
-          {new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long", year: "numeric" })}
+          {new Date().toLocaleDateString("fr-FR", {
+            weekday: "long",
+            day: "numeric",
+            month: "long",
+            year: "numeric",
+          })}
         </h1>
         <p className="text-sm text-slate-500">Suivi des travaux d'atelier — FARATEC.</p>
       </div>
 
-      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+      <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-3">
         {modules.map((m) => (
           <Tile key={m.to} to={m.to} label={m.label} image={m.image} />
         ))}

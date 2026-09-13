@@ -7,6 +7,7 @@ import {
   Clock, CheckCircle2, AlertTriangle, ChevronDown, ChevronUp, History,
   Sparkles, Filter, ZoomIn, Zap, Calculator
 } from "lucide-react";
+import SearchableSelect from "../components/SearchableSelect";
 
 // --- TYPES ---
 interface Equipement {
@@ -29,10 +30,8 @@ interface Equipement {
   urgence: string | null;
   semaine_entree: number | null;
 }
-interface TypeEquipement {
-  id: string;
-  name: string;
-}
+interface TypeEquipement { id: string; name: string; }
+interface NatureTravaux { id: string; name: string; }
 interface Passage {
   id: string;
   equipement_id: string;
@@ -83,6 +82,7 @@ export default function EquipementsPage() {
   const [equipements, setEquipements] = useState<Equipement[]>([]);
   const [passages, setPassages] = useState<Passage[]>([]);
   const [typesEquipement, setTypesEquipement] = useState<TypeEquipement[]>([]);
+  const [naturesTravaux, setNaturesTravaux] = useState<NatureTravaux[]>([]);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [filterMode, setFilterMode] = useState<"all" | "en_cours" | "livres" | "stagnant" | "urgent">("all");
@@ -93,31 +93,31 @@ export default function EquipementsPage() {
   // --- CRÉATION ---
   const [creating, setCreating] = useState(false);
   const [newForm, setNewForm] = useState({ ...EMPTY_FORM });
-  const [newCustomType, setNewCustomType] = useState("");
   const [newErrors, setNewErrors] = useState<Record<string, string>>({});
   const [newSaving, setNewSaving] = useState(false);
 
   // --- ÉDITION ---
   const [editing, setEditing] = useState<Equipement | null>(null);
   const [editForm, setEditForm] = useState({ ...EMPTY_FORM });
-  const [editCustomType, setEditCustomType] = useState("");
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
 
   // --- CHARGEMENT ---
   const load = async () => {
     setLoading(true);
-    const [eqRes, passRes, typesRes] = await Promise.all([
+    const [eqRes, passRes, typesRes, naturesRes] = await Promise.all([
       supabase.from("equipements").select("*").is("deleted_at", null).order("created_at", { ascending: false }),
       supabase.from("journal_passages")
         .select("id, equipement_id, atelier_id, operateur_id, pourcentage, commentaire, photo_url, passage_date, ateliers(name), operateurs(full_name)")
         .is("deleted_at", null)
         .order("passage_date", { ascending: false }),
       supabase.from("types_equipement").select("id, name").order("name"),
+      supabase.from("natures_travaux").select("id, name").order("name"),
     ]);
     setEquipements((eqRes.data as Equipement[]) || []);
     setPassages((passRes.data as unknown as Passage[]) || []);
     setTypesEquipement((typesRes.data as TypeEquipement[]) || []);
+    setNaturesTravaux((naturesRes.data as NatureTravaux[]) || []);
     setLoading(false);
   };
 
@@ -192,42 +192,50 @@ export default function EquipementsPage() {
   }, [equipements, filterMode, searchTerm, stagnantIds, dernierPassageMap]);
 
   // --- GESTION DES TYPES ---
-  const handleCreateTypeIfNeeded = async (typeName: string): Promise<string> => {
-    if (!user || !typeName.trim()) return typeName.trim();
-    const existing = typesEquipement.find((t) => t.name.toLowerCase() === typeName.trim().toLowerCase());
-    if (existing) return existing.name;
+  const handleCreateTypeEquipement = async (typeName: string) => {
+    if (!user || !typeName.trim()) return;
     const { data } = await supabase.from("types_equipement").insert({
       name: typeName.trim(),
       owner_id: user.id,
     }).select().single();
     if (data) {
       setTypesEquipement((prev) => [...prev, data as TypeEquipement].sort((a, b) => a.name.localeCompare(b.name)));
-      return (data as TypeEquipement).name;
+      setNewForm((f) => ({ ...f, type_equipement: (data as TypeEquipement).name }));
+      setEditForm((f) => ({ ...f, type_equipement: (data as TypeEquipement).name }));
     }
-    return typeName.trim();
+  };
+
+  const handleCreateNatureTravaux = async (natureName: string) => {
+    if (!user || !natureName.trim()) return;
+    const { data } = await supabase.from("natures_travaux").insert({
+      name: natureName.trim(),
+      owner_id: user.id,
+    }).select().single();
+    if (data) {
+      setNaturesTravaux((prev) => [...prev, data as NatureTravaux].sort((a, b) => a.name.localeCompare(b.name)));
+      setNewForm((f) => ({ ...f, nature_travaux: (data as NatureTravaux).name }));
+      setEditForm((f) => ({ ...f, nature_travaux: (data as NatureTravaux).name }));
+    }
   };
 
   // --- CRÉATION ---
   const openCreate = () => {
     setCreating(true);
     setNewForm({ ...EMPTY_FORM });
-    setNewCustomType("");
     setNewErrors({});
   };
-  const closeCreate = () => { setCreating(false); setNewErrors({}); setNewCustomType(""); };
+  const closeCreate = () => { setCreating(false); setNewErrors({}); };
 
   const handleCreate = async () => {
     if (!user) return;
     const errs: Record<string, string> = {};
     if (!newForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
     if (!newForm.client_name.trim()) errs.client_name = "Obligatoire";
-    const finalType = newForm.type_equipement === "__autre__" ? newCustomType : newForm.type_equipement;
-    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
+    if (!newForm.type_equipement.trim()) errs.type_equipement = "Obligatoire";
     setNewErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setNewSaving(true);
-    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
 
     const d = new Date();
     const dayNum = d.getDay() || 7;
@@ -238,7 +246,7 @@ export default function EquipementsPage() {
     const { data, error } = await supabase.from("equipements").insert({
       code_faratec: newForm.code_faratec.trim(),
       client_name: newForm.client_name.trim(),
-      type_equipement: typeFinalName,
+      type_equipement: newForm.type_equipement,
       ndi_da_ns: newForm.ndi_da_ns.trim() || null,
       mle_reference: newForm.mle_reference.trim() || null,
       marque: newForm.marque.trim() || null,
@@ -247,7 +255,7 @@ export default function EquipementsPage() {
       vitesse: newForm.vitesse.trim() || null,
       operateur: newForm.operateur.trim() || null,
       urgence: newForm.urgence || "normal",
-      nature_travaux: newForm.nature_travaux.trim() || null,
+      nature_travaux: newForm.nature_travaux || null,
       owner_id: user.id,
       statut: "en_attente",
       pourcentage_global: 0,
@@ -267,11 +275,10 @@ export default function EquipementsPage() {
   // --- ÉDITION ---
   const openEdit = (eq: Equipement) => {
     setEditing(eq);
-    const isKnownType = typesEquipement.some((t) => t.name === eq.type_equipement);
     setEditForm({
       code_faratec: eq.code_faratec || "",
       client_name: eq.client_name || "",
-      type_equipement: isKnownType ? eq.type_equipement : "__autre__",
+      type_equipement: eq.type_equipement || "",
       ndi_da_ns: eq.ndi_da_ns || "",
       mle_reference: eq.mle_reference || "",
       marque: eq.marque || "",
@@ -282,29 +289,26 @@ export default function EquipementsPage() {
       urgence: eq.urgence || "normal",
       nature_travaux: eq.nature_travaux || "",
     });
-    setEditCustomType(isKnownType ? "" : (eq.type_equipement || ""));
     setEditErrors({});
   };
-  const closeEdit = () => { setEditing(null); setEditErrors({}); setEditCustomType(""); };
+  const closeEdit = () => { setEditing(null); setEditErrors({}); };
 
   const handleSaveEdit = async () => {
     if (!editing || !user) return;
     const errs: Record<string, string> = {};
     if (!editForm.code_faratec.trim()) errs.code_faratec = "Obligatoire";
     if (!editForm.client_name.trim()) errs.client_name = "Obligatoire";
-    const finalType = editForm.type_equipement === "__autre__" ? editCustomType : editForm.type_equipement;
-    if (!finalType.trim()) errs.type_equipement = "Obligatoire";
+    if (!editForm.type_equipement.trim()) errs.type_equipement = "Obligatoire";
     setEditErrors(errs);
     if (Object.keys(errs).length > 0) return;
 
     setEditSaving(true);
-    const typeFinalName = await handleCreateTypeIfNeeded(finalType);
 
     const updated: Equipement = {
       ...editing,
       code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: typeFinalName,
+      type_equipement: editForm.type_equipement,
       ndi_da_ns: editForm.ndi_da_ns.trim() || null,
       mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
@@ -313,14 +317,14 @@ export default function EquipementsPage() {
       vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
-      nature_travaux: editForm.nature_travaux.trim() || null,
+      nature_travaux: editForm.nature_travaux || null,
     };
     setEquipements((prev) => prev.map((e) => (e.id === editing.id ? updated : e)));
 
     await supabase.from("equipements").update({
       code_faratec: editForm.code_faratec.trim(),
       client_name: editForm.client_name.trim(),
-      type_equipement: typeFinalName,
+      type_equipement: editForm.type_equipement,
       ndi_da_ns: editForm.ndi_da_ns.trim() || null,
       mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
@@ -329,7 +333,7 @@ export default function EquipementsPage() {
       vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
-      nature_travaux: editForm.nature_travaux.trim() || null,
+      nature_travaux: editForm.nature_travaux || null,
     }).eq("id", editing.id);
 
     setEditSaving(false);
@@ -362,8 +366,6 @@ export default function EquipementsPage() {
   const renderFormFields = (
     form: typeof EMPTY_FORM,
     setForm: React.Dispatch<React.SetStateAction<typeof EMPTY_FORM>>,
-    customType: string,
-    setCustomType: React.Dispatch<React.SetStateAction<string>>,
     errors: Record<string, string>
   ) => (
     <div className="space-y-5">
@@ -391,28 +393,22 @@ export default function EquipementsPage() {
             {errors.client_name && <p className="text-xs text-red-600 mt-1">{errors.client_name}</p>}
           </div>
         </div>
+
         <div className="grid grid-cols-2 gap-3 mt-3">
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Type d'équipement *</label>
-            <select
+            <SearchableSelect
               value={form.type_equipement}
-              onChange={(e) => { setForm((f) => ({ ...f, type_equipement: e.target.value })); setCustomType(""); }}
-              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.type_equipement ? "border-red-400" : "border-slate-200"}`}
-            >
-              <option value="">-- Sélectionner --</option>
-              {typesEquipement.map((t) => (
-                <option key={t.id} value={t.name}>{t.name}</option>
-              ))}
-              <option value="__autre__">+ Autre (saisir)</option>
-            </select>
-            {form.type_equipement === "__autre__" && (
-              <input
-                value={customType}
-                onChange={(e) => setCustomType(e.target.value)}
-                placeholder="Nouveau type d'équipement..."
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm mt-2 focus:ring-2 focus:ring-amber-500 focus:outline-none"
-              />
-            )}
+              onChange={(val) => setForm((f) => ({ ...f, type_equipement: val }))}
+              options={typesEquipement.map((t) => ({ value: t.name, label: t.name }))}
+              placeholder="Sélectionner un type..."
+              searchPlaceholder="Rechercher un type..."
+              emptyMessage="Aucun type trouvé"
+              error={!!errors.type_equipement}
+              hasOtherOption={true}
+              otherLabel="+ Nouveau type d'équipement"
+              onOtherCreate={handleCreateTypeEquipement}
+            />
             {errors.type_equipement && <p className="text-xs text-red-600 mt-1">{errors.type_equipement}</p>}
           </div>
           <div>
@@ -504,11 +500,16 @@ export default function EquipementsPage() {
           </div>
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Nature des travaux</label>
-            <input
+            <SearchableSelect
               value={form.nature_travaux}
-              onChange={(e) => setForm((f) => ({ ...f, nature_travaux: e.target.value }))}
-              placeholder="Optionnel (modifiable plus tard)"
-              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              onChange={(val) => setForm((f) => ({ ...f, nature_travaux: val }))}
+              options={naturesTravaux.map((n) => ({ value: n.name, label: n.name }))}
+              placeholder="Sélectionner une nature..."
+              searchPlaceholder="Rechercher..."
+              emptyMessage="Aucune nature trouvée"
+              hasOtherOption={true}
+              otherLabel="+ Nouvelle nature de travaux"
+              onOtherCreate={handleCreateNatureTravaux}
             />
           </div>
         </div>
@@ -653,7 +654,8 @@ export default function EquipementsPage() {
                         )}
                         {isStagnant && !isLivre && (
                           <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1">
-                            <AlertTriangle size={9} /> STAGNANT                          </span>
+                            <AlertTriangle size={9} /> STAGNANT
+                          </span>
                         )}
                         {isNew && !isLivre && (
                           <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-bold">
@@ -664,15 +666,11 @@ export default function EquipementsPage() {
                       <p className="text-sm text-slate-600 mt-0.5">{e.client_name}</p>
                       <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5 flex-wrap">
                         <span>{e.type_equipement}</span>
+                        {e.nature_travaux && <><span className="text-slate-300">•</span><span className="text-amber-700">{e.nature_travaux}</span></>}
                         {e.mle_reference && <><span className="text-slate-300">•</span><span>MLE: {e.mle_reference}</span></>}
                         {e.marque && <><span className="text-slate-300">•</span><span>{e.marque}</span></>}
                         {e.puissance_kw && <><span className="text-slate-300">•</span><span>{e.puissance_kw} kW</span></>}
-                        {e.tension && <><span className="text-slate-300">•</span><span>{e.tension}</span></>}
-                        {e.vitesse && <><span className="text-slate-300">•</span><span>{e.vitesse}</span></>}
                       </div>
-                      {e.ndi_da_ns && (
-                        <p className="text-[10px] text-slate-400 mt-0.5">NDI/DA/NS: {e.ndi_da_ns}</p>
-                      )}
                       {dernierPassage && !isLivre && (
                         <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
                           <Clock size={10} />
@@ -684,9 +682,6 @@ export default function EquipementsPage() {
                           <CheckCircle2 size={10} />
                           Livré le {formatDate(e.date_livraison_reelle)}
                         </p>
-                      )}
-                      {!isLivre && e.semaine_entree && (
-                        <p className="text-[10px] text-slate-400 mt-0.5">Entrée semaine {e.semaine_entree}</p>
                       )}
                     </div>
 
@@ -825,7 +820,7 @@ export default function EquipementsPage() {
             </div>
 
             <div className="p-5">
-              {renderFormFields(newForm, setNewForm, newCustomType, setNewCustomType, newErrors)}
+              {renderFormFields(newForm, setNewForm, newErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">
@@ -862,7 +857,7 @@ export default function EquipementsPage() {
             </div>
 
             <div className="p-5">
-              {renderFormFields(editForm, setEditForm, editCustomType, setEditCustomType, editErrors)}
+              {renderFormFields(editForm, setEditForm, editErrors)}
             </div>
 
             <div className="p-5 border-t border-slate-100 flex justify-end gap-2 sticky bottom-0 bg-white">
