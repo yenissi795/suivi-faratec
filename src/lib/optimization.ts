@@ -1,11 +1,10 @@
 // =========================================================
 // MODULE OPTIMIZATION - Analyse des performances
-// Basé sur les coefficients officiels (IEEE 1068, normes russes)
 // =========================================================
 
 import { calculerTempsTravail } from "./workTime";
 
-// --- TYPES ---
+// --- TYPES DE BASE ---
 export interface CoefficientTravail {
   id: string;
   type_travail: string;
@@ -49,6 +48,30 @@ export interface AnalyseResult {
   est_termine: boolean;
 }
 
+// --- INTERFACE DETAILS EQUIPEMENT (pour les stats opérateur) ---
+export interface DetailsEquipement {
+  equipement_id: string;
+  code_faratec: string;
+  temps_operateur_jours: number;
+  temps_total_equipement_jours: number;
+  efficacite_equipement: number;
+}
+
+// --- INTERFACE STATS OPERATEUR ---
+export interface StatsOperateur {
+  operateur_id: string;
+  operateur_nom: string;
+  nb_equipements: number;
+  temps_reel_jours: number;
+  temps_attendu_jours: number;
+  efficacite: number;
+  nb_sur_duree: number;
+  a_assez_de_donnees: boolean;
+  details_equipements: DetailsEquipement[];
+}
+
+export const SEUIL_MIN_EQUIPEMENTS = 3;
+
 // --- UTILITAIRE : Un équipement est-il terminé ? ---
 export function isEquipementTermine(eq: EquipementAnalyse): boolean {
   const pct = eq.pourcentage_global ?? 0;
@@ -58,14 +81,12 @@ export function isEquipementTermine(eq: EquipementAnalyse): boolean {
 // --- TRADUCTION nature_travaux -> type_travail interne ---
 export function mapperNatureVersType(nature: string | null): string {
   if (!nature) return "revision";
-
   const n = nature.toLowerCase();
   if (n.includes("rebobinage") || n.includes("bobinage")) return "rebobinage";
   if (n.includes("mecanique") || n.includes("mécanique")) return "mecanique";
   if (n.includes("equilibrage") || n.includes("équilibrage")) return "equilibrage";
   if (n.includes("peinture")) return "peinture";
   if (n.includes("revision") || n.includes("révision")) return "revision";
-
   return "revision";
 }
 
@@ -97,7 +118,6 @@ export function getTranchePuissance(puissance_kw: number | null): string {
 }
 
 // --- CALCUL DE L'ANALYSE D'UN ÉQUIPEMENT ---
-// Efficacité = (progression × temps_attendu) / temps_réel × 100
 export function analyserEquipement(
   equipement: EquipementAnalyse,
   sessionsEquipement: SessionAnalyse[],
@@ -115,13 +135,11 @@ export function analyserEquipement(
   const progression = (equipement.pourcentage_global ?? 0) / 100;
   const estTermine = isEquipementTermine(equipement);
 
-  // Efficacité seulement si terminé
   let efficacite = 0;
   if (estTermine && tempsReelJours > 0 && tempsAttenduJours > 0) {
     efficacite = Math.round((tempsAttenduJours / tempsReelJours) * 100);
   }
 
-  // Dépassement basé sur le temps attendu × progression
   const tempsAttenduPartiel = tempsAttenduJours * progression;
   const depassement = tempsAttenduPartiel > 0
     ? Math.round(((tempsReelJours - tempsAttenduPartiel) / tempsAttenduPartiel) * 100)
@@ -142,90 +160,106 @@ export function analyserEquipement(
   };
 }
 
-// --- STATS PAR OPÉRATEUR ---
-// Ne compte QUE les équipements terminés (min 3)
-export interface StatsOperateur {
-  operateur_id: string;
-  operateur_nom: string;
-  nb_equipements: number;
-  temps_reel_jours: number;
-  temps_attendu_jours: number;
-  efficacite: number;
-  nb_sur_duree: number;
-  a_assez_de_donnees: boolean;
-}
-
-export const SEUIL_MIN_EQUIPEMENTS = 3;
-
+// =========================================================
+// STATS PAR OPÉRATEUR
+// =========================================================
 export function calculerStatsParOperateur(
   sessions: SessionAnalyse[],
   equipementsMap: Map<string, EquipementAnalyse>,
   coefficients: CoefficientTravail[],
   operateursMap: Map<string, string>
 ): StatsOperateur[] {
-  // 1. Filtrer uniquement les sessions sur équipements TERMINÉS
+  // 1. Filtrer sessions sur équipements terminés
   const sessionsTerminees = sessions.filter((s) => {
     const eq = equipementsMap.get(s.equipement_id);
     return eq && isEquipementTermine(eq);
   });
 
-  // 2. Grouper par opérateur
+  // 2. Efficacité par équipement
+  const efficaciteParEquipement = new Map<string, { efficacite: number; tempsTotalJours: number }>();
+  const equipementsTermines = new Set(sessionsTerminees.map((s) => s.equipement_id));
+  equipementsTermines.forEach((eqId) => {
+    const eq = equipementsMap.get(eqId);
+    if (!eq) return;
+    const sessEq = sessionsTerminees.filter((s) => s.equipement_id === eqId);
+    const analyse = analyserEquipement(eq, sessEq, coefficients);
+    efficaciteParEquipement.set(eqId, {
+      efficacite: analyse.efficacite,
+      tempsTotalJours: analyse.temps_reel_jours,
+    });
+  });
+
+  // 3. Regrouper par opérateur
   const parOperateur = new Map<string, {
-    equipementsTouches: Set<string>;
-    tempsReelMinutes: number;
-    tempsAttenduTotal: number;
-    nbSurDuree: number;
+    equipementsContribues: Map<string, number>;
+    tempsReelJours: number;
   }>();
 
   sessionsTerminees.forEach((s) => {
     const opId = s.operateur_id;
     if (!parOperateur.has(opId)) {
       parOperateur.set(opId, {
-        equipementsTouches: new Set(),
-        tempsReelMinutes: 0,
-        tempsAttenduTotal: 0,
-        nbSurDuree: 0,
+        equipementsContribues: new Map(),
+        tempsReelJours: 0,
       });
     }
     const entry = parOperateur.get(opId)!;
-    entry.tempsReelMinutes += calculerTempsTravail(s.started_at, s.ended_at);
-
-    if (!entry.equipementsTouches.has(s.equipement_id)) {
-      entry.equipementsTouches.add(s.equipement_id);
-      const eq = equipementsMap.get(s.equipement_id);
-      if (eq) {
-        const coef = getCoefficient(coefficients, eq.nature_travaux, eq.puissance_kw);
-        if (coef) {
-          entry.tempsAttenduTotal += Number(coef.temps_attendu_jours);
-        }
-      }
-    }
+    const tempsMin = calculerTempsTravail(s.started_at, s.ended_at);
+    const tempsJours = tempsMin / (8 * 60);
+    entry.tempsReelJours += tempsJours;
+    entry.equipementsContribues.set(
+      s.equipement_id,
+      (entry.equipementsContribues.get(s.equipement_id) || 0) + tempsJours
+    );
   });
 
-  // 3. Calculer l'efficacité
+  // 4. Calculer l'efficacité pondérée
   const results: StatsOperateur[] = [];
   parOperateur.forEach((data, opId) => {
-    const tempsReelJours = data.tempsReelMinutes / (8 * 60);
-    const nbEq = data.equipementsTouches.size;
+    const nbEq = data.equipementsContribues.size;
     const aAssez = nbEq >= SEUIL_MIN_EQUIPEMENTS;
 
-    const efficacite = aAssez && tempsReelJours > 0 && data.tempsAttenduTotal > 0
-      ? Math.round((data.tempsAttenduTotal / tempsReelJours) * 100)
+    let sommeEfficacitePonderee = 0;
+    let sommePoids = 0;
+    const details: DetailsEquipement[] = [];
+
+    data.equipementsContribues.forEach((tempsOperateurJours, eqId) => {
+      const eqInfo = efficaciteParEquipement.get(eqId);
+      if (!eqInfo || eqInfo.tempsTotalJours <= 0) return;
+
+      const poids = tempsOperateurJours / eqInfo.tempsTotalJours;
+      sommeEfficacitePonderee += eqInfo.efficacite * poids;
+      sommePoids += poids;
+
+      const eq = equipementsMap.get(eqId);
+      details.push({
+        equipement_id: eqId,
+        code_faratec: eq?.code_faratec || "—",
+        temps_operateur_jours: Math.round(tempsOperateurJours * 10) / 10,
+        temps_total_equipement_jours: Math.round(eqInfo.tempsTotalJours * 10) / 10,
+        efficacite_equipement: eqInfo.efficacite,
+      });
+    });
+
+    const efficacite = aAssez && sommePoids > 0
+      ? Math.round(sommeEfficacitePonderee / sommePoids)
       : 0;
+
+    const tempsAttenduJours = data.tempsReelJours * (efficacite / 100);
 
     results.push({
       operateur_id: opId,
       operateur_nom: operateursMap.get(opId) || "Inconnu",
       nb_equipements: nbEq,
-      temps_reel_jours: Math.round(tempsReelJours * 10) / 10,
-      temps_attendu_jours: Math.round(data.tempsAttenduTotal * 10) / 10,
+      temps_reel_jours: Math.round(data.tempsReelJours * 10) / 10,
+      temps_attendu_jours: Math.round(tempsAttenduJours * 10) / 10,
       efficacite,
-      nb_sur_duree: data.nbSurDuree,
+      nb_sur_duree: 0,
       a_assez_de_donnees: aAssez,
+      details_equipements: details.sort((a, b) => b.temps_operateur_jours - a.temps_operateur_jours),
     });
   });
 
-  // Trier : ceux avec assez de données d'abord, puis par efficacité
   return results.sort((a, b) => {
     if (a.a_assez_de_donnees && !b.a_assez_de_donnees) return -1;
     if (!a.a_assez_de_donnees && b.a_assez_de_donnees) return 1;
@@ -233,8 +267,9 @@ export function calculerStatsParOperateur(
   });
 }
 
-// --- STATS PAR TRANCHE DE PUISSANCE ---
-// Uniquement équipements terminés
+// =========================================================
+// STATS PAR TRANCHE DE PUISSANCE
+// =========================================================
 export interface StatsTranche {
   tranche: string;
   nb_equipements: number;
@@ -253,14 +288,12 @@ export function calculerStatsParTranche(
 
   tranches.forEach((t) => map.set(t, { nb_eq: 0, temps_attendu: 0, temps_reel: 0 }));
 
-  // On ne compte QUE les équipements terminés
   equipements.filter((e) => isEquipementTermine(e)).forEach((e) => {
     const tranche = getTranchePuissance(e.puissance_kw);
     const entry = map.get(tranche);
     if (!entry) return;
 
     entry.nb_eq += 1;
-
     const coef = getCoefficient(coefficients, e.nature_travaux, e.puissance_kw);
     if (coef) entry.temps_attendu += Number(coef.temps_attendu_jours);
 
@@ -285,7 +318,9 @@ export function calculerStatsParTranche(
   });
 }
 
-// --- COULEUR D'EFFICACITÉ ---
+// =========================================================
+// COULEUR D'EFFICACITÉ
+// =========================================================
 export function getEfficaciteColor(efficacite: number): { bg: string; text: string; label: string } {
   if (efficacite >= 120) return { bg: "bg-emerald-100", text: "text-emerald-700", label: "Excellent" };
   if (efficacite >= 100) return { bg: "bg-green-100", text: "text-green-700", label: "Bon" };

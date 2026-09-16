@@ -19,7 +19,7 @@ const modules = [
   { to: "/temps-operateurs", label: "Temps opérateurs", image: tileTempsOperateurs },
   { to: "/couts", label: "Coûts", image: tileCouts },
   { to: "/optimisation", label: "Optimisation", image: tileOptimisation },
-  { to: "/vue-client", label: "Vue Client", image: tileVueClient },
+  { to: "/vue-client", label: "Répertoire équipements", image: tileVueClient },
   { to: "/rapports", label: "Rapports", image: tileRapports },
 ];
 

@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import {
   AlertTriangle, Target, Users, Factory,
-  Activity,Zap, Info,
+  Activity, Zap, Info,
   Loader2, AlertOctagon, CheckCircle2, Gauge
 } from "lucide-react";
 import {
@@ -17,7 +17,7 @@ import {
   type EquipementAnalyse,
   type SessionAnalyse,
 } from "../lib/optimization";
-import { calculerTempsTravail, formatDureeMinutes } from "../lib/workTime";
+import { calculerTempsTravail, formatDureeMinutes, formatJoursEnHeures } from "../lib/workTime";
 
 interface Operateur { id: string; full_name: string; }
 interface Atelier { id: string; name: string; }
@@ -130,7 +130,6 @@ export default function OptimisationPage() {
     return m;
   }, [sessionsInPeriod]);
 
-  // --- MODULE 1 : SUR-DURÉES (équipements EN COURS ou TERMINÉS) ---
   const equipementsSurDuree = useMemo(() => {
     return equipementsInPeriod
       .map((eq) => {
@@ -142,12 +141,10 @@ export default function OptimisationPage() {
       .sort((a, b) => b.analyse.depassement_pourcentage - a.analyse.depassement_pourcentage);
   }, [equipementsInPeriod, sessionsByEquipement, coefficients]);
 
-  // --- MODULE 2 : OPÉRATEURS (uniquement terminés) ---
   const statsOperateurs = useMemo(() => {
     return calculerStatsParOperateur(sessionsInPeriod, equipementsMap, coefficients, operateursMap);
   }, [sessionsInPeriod, equipementsMap, coefficients, operateursMap]);
 
-  // --- MODULE 4 : ATELIERS ---
   const statsAteliers = useMemo(() => {
     return ateliers.map((a) => {
       const sessAtelier = sessionsInPeriod.filter((s) => s.atelier_id === a.id);
@@ -159,12 +156,10 @@ export default function OptimisationPage() {
     }).filter((x) => x.nb_sessions > 0).sort((a, b) => b.temps_total_min - a.temps_total_min);
   }, [ateliers, sessionsInPeriod]);
 
-  // --- MODULE 5 : TRANCHES (uniquement terminés) ---
   const statsTranches = useMemo(() => {
     return calculerStatsParTranche(equipementsInPeriod, sessionsInPeriodByEquipement, coefficients);
   }, [equipementsInPeriod, sessionsInPeriodByEquipement, coefficients]);
 
-  // --- KPIs (basés uniquement sur les terminés) ---
   const kpis = useMemo(() => {
     const analyses = equipementsInPeriod
       .filter((eq) => isEquipementTermine(eq))
@@ -214,11 +209,10 @@ export default function OptimisationPage() {
         </div>
       </div>
 
-      {/* Bandeau info */}
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-start gap-2">
         <Info size={14} className="text-blue-600 shrink-0 mt-0.5" />
         <p className="text-xs text-blue-800">
-          <strong>Note :</strong> Le classement des opérateurs se base <strong>uniquement</strong> sur les équipements <strong>terminés</strong> (min {SEUIL_MIN_EQUIPEMENTS} équipements par opérateur). Les équipements en cours sont exclus pour des résultats fiables.
+          <strong>Note :</strong> Tous les temps sont affichés en <strong>heures</strong> (base 8h/jour). Le classement des opérateurs se base uniquement sur les équipements <strong>terminés</strong> (min {SEUIL_MIN_EQUIPEMENTS}).
         </p>
       </div>
 
@@ -236,7 +230,6 @@ export default function OptimisationPage() {
         ))}
       </div>
 
-      {/* KPIs */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-emerald-500">
           <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
@@ -273,7 +266,6 @@ export default function OptimisationPage() {
         </div>
       </div>
 
-      {/* MODULE 1 : SUR-DURÉES */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden border-l-4 border-red-500">
         <div className="p-4 border-b border-slate-100 bg-red-50/50">
           <h2 className="font-semibold text-red-800 text-sm flex items-center gap-2">
@@ -281,7 +273,7 @@ export default function OptimisationPage() {
             Détection des sur-durées ({equipementsSurDuree.length})
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Équipements (en cours ou terminés) dont le temps réel dépasse le temps attendu proportionnel à la progression
+            Équipements dont le temps réel dépasse le temps attendu (+tolérance)
           </p>
         </div>
 
@@ -320,11 +312,11 @@ export default function OptimisationPage() {
                   <div className="flex items-center gap-4 sm:w-72">
                     <div className="flex-1">
                       <p className="text-[10px] text-slate-500 mb-0.5">Attendu</p>
-                      <p className="text-sm font-bold text-slate-700">{analyse.temps_attendu_jours}j</p>
+                      <p className="text-sm font-bold text-slate-700">{formatJoursEnHeures(analyse.temps_attendu_jours)}</p>
                     </div>
                     <div className="flex-1">
                       <p className="text-[10px] text-slate-500 mb-0.5">Réel</p>
-                      <p className="text-sm font-bold text-red-600">{analyse.temps_reel_jours}j</p>
+                      <p className="text-sm font-bold text-red-600">{formatJoursEnHeures(analyse.temps_reel_jours)}</p>
                     </div>
                     <div className="flex-1">
                       <p className="text-[10px] text-slate-500 mb-0.5">Efficacité</p>
@@ -340,7 +332,6 @@ export default function OptimisationPage() {
         )}
       </div>
 
-      {/* MODULE 2 : OPÉRATEURS */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-emerald-50 to-white">
           <h2 className="font-semibold text-emerald-800 text-sm flex items-center gap-2">
@@ -390,7 +381,7 @@ export default function OptimisationPage() {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold text-slate-800 truncate">{op.operateur_nom}</p>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      {op.nb_equipements} équipement{op.nb_equipements > 1 ? "s" : ""} · {op.temps_reel_jours}j réel / {op.temps_attendu_jours}j attendu
+                      {op.nb_equipements} équipement{op.nb_equipements > 1 ? "s" : ""} · {formatJoursEnHeures(op.temps_reel_jours)} réel
                     </p>
                   </div>
                   <div className="text-right shrink-0">
@@ -406,7 +397,6 @@ export default function OptimisationPage() {
         )}
       </div>
 
-      {/* MODULE 5 : TRANCHES */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-blue-50 to-white">
           <h2 className="font-semibold text-blue-800 text-sm flex items-center gap-2">
@@ -434,8 +424,8 @@ export default function OptimisationPage() {
                   <tr key={t.tranche} className="hover:bg-slate-50/50">
                     <td className="p-3 font-semibold text-slate-700">{t.tranche}</td>
                     <td className="p-3 text-center text-slate-600">{t.nb_equipements}</td>
-                    <td className="p-3 text-right text-slate-600">{t.temps_attendu_total}j</td>
-                    <td className="p-3 text-right text-slate-600">{t.temps_reel_total}j</td>
+                    <td className="p-3 text-right text-slate-600">{formatJoursEnHeures(t.temps_attendu_total)}</td>
+                    <td className="p-3 text-right text-slate-600">{formatJoursEnHeures(t.temps_reel_total)}</td>
                     <td className="p-3 text-right">
                       {t.nb_equipements > 0 && t.temps_reel_total > 0 ? (
                         <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${color.bg} ${color.text}`}>
@@ -453,7 +443,6 @@ export default function OptimisationPage() {
         </div>
       </div>
 
-      {/* MODULE 4 : ATELIERS */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-purple-50 to-white">
           <h2 className="font-semibold text-purple-800 text-sm flex items-center gap-2">

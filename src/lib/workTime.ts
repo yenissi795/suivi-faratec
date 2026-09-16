@@ -1,44 +1,38 @@
 // =========================================================
 // MODULE WORK TIME - Calcul du temps de travail effectif
-// selon les horaires de l'usine FARATEC
 // =========================================================
 
-// Plages horaires par jour de la semaine
-// 0 = Dimanche, 1 = Lundi, ..., 6 = Samedi
-// Format : minutes depuis minuit (8h = 480, 12h30 = 750)
 export const HORAIRES_PAR_JOUR: Record<number, { debut: number; fin: number }[]> = {
-  0: [], // Dimanche : repos
-  1: [ // Lundi
-    { debut: 8 * 60, fin: 12 * 60 + 30 },      // 8h00 → 12h30
-    { debut: 13 * 60 + 30, fin: 17 * 60 + 30 }, // 13h30 → 17h30
-  ],
-  2: [ // Mardi
+  0: [],
+  1: [
     { debut: 8 * 60, fin: 12 * 60 + 30 },
     { debut: 13 * 60 + 30, fin: 17 * 60 + 30 },
   ],
-  3: [ // Mercredi
+  2: [
     { debut: 8 * 60, fin: 12 * 60 + 30 },
     { debut: 13 * 60 + 30, fin: 17 * 60 + 30 },
   ],
-  4: [ // Jeudi
+  3: [
     { debut: 8 * 60, fin: 12 * 60 + 30 },
     { debut: 13 * 60 + 30, fin: 17 * 60 + 30 },
   ],
-  5: [ // Vendredi (spécial)
-    { debut: 8 * 60, fin: 13 * 60 },             // 8h00 → 13h00
-    { debut: 14 * 60 + 30, fin: 17 * 60 + 30 },  // 14h30 → 17h30
+  4: [
+    { debut: 8 * 60, fin: 12 * 60 + 30 },
+    { debut: 13 * 60 + 30, fin: 17 * 60 + 30 },
   ],
-  6: [ // Samedi (spécial)
-    { debut: 8 * 60, fin: 12 * 60 },             // 8h00 → 12h00
+  5: [
+    { debut: 8 * 60, fin: 13 * 60 },
+    { debut: 14 * 60 + 30, fin: 17 * 60 + 30 },
+  ],
+  6: [
+    { debut: 8 * 60, fin: 12 * 60 },
   ],
 };
 
-// Seuil en heures pour considérer une session "orpheline"
 export const SEUIL_ORPHELINE_HEURES = 8;
 
 /**
  * Calcule le temps de travail effectif en MINUTES entre 2 dates.
- * Exclut : heures hors travail, pauses, dimanches.
  */
 export function calculerTempsTravail(startIso: string, endIso: string | null): number {
   const start = new Date(startIso);
@@ -77,72 +71,55 @@ export function calculerTempsTravail(startIso: string, endIso: string | null): n
   return Math.round(totalMinutes);
 }
 
+// =========================================================
+// FORMATS D'AFFICHAGE — TOUT EN HEURES
+// =========================================================
+
 /**
- * Formate une durée en minutes au format "Xh YY" ou "Ymin".
+ * Format heures principales (ex: "3h", "3h30", "12h", "120h")
  */
 export function formatDureeMinutes(minutes: number): string {
-  if (minutes < 1) return "0min";
-  if (minutes < 60) return `${minutes}min`;
+  if (minutes < 1) return "0h";
   const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  if (h > 24) {
-    const j = Math.floor(h / 24);
-    const reste = h % 24;
-    return `${j}j ${reste}h`;
-  }
+  const m = Math.round(minutes % 60);
+  if (h === 0) return `${m}min`;
+  if (m === 0) return `${h}h`;
   return `${h}h${m.toString().padStart(2, "0")}`;
 }
 
 /**
- * Formate une durée en millisecondes (pour compatibilité).
+ * Convertit des jours (base 8h/jour) en heures formatées.
+ * Ex: 3.5j → "28h"
  */
+export function formatJoursEnHeures(jours: number): string {
+  const minutes = jours * 8 * 60;
+  return formatDureeMinutes(minutes);
+}
+
+/**
+ * Format court (badges)
+ */
+export function formatDureeCourte(minutes: number): string {
+  if (minutes < 60) return `${Math.round(minutes)}min`;
+  const h = Math.floor(minutes / 60);
+  const m = Math.round(minutes % 60);
+  if (m === 0) return `${h}h`;
+  return `${h}h${m.toString().padStart(2, "0")}`;
+}
+
 export function formatDureeMs(ms: number): string {
   const minutes = Math.floor(ms / 60000);
   return formatDureeMinutes(minutes);
 }
 
-/**
- * Vérifie si une session est "orpheline" (démarrée depuis plus de X heures).
- * Si oui, retourne la date de fin logique (fin de journée où elle a démarré).
- */
-export function getSessionAutoCloseDate(startIso: string, seuilHeures: number = SEUIL_ORPHELINE_HEURES): string | null {
-  const start = new Date(startIso);
-  const now = new Date();
-  const diffHeures = (now.getTime() - start.getTime()) / 3600000;
-
-  if (diffHeures < seuilHeures) return null;
-
-  const dayOfWeek = start.getDay();
-  const plages = HORAIRES_PAR_JOUR[dayOfWeek] || [];
-  if (plages.length === 0) return null;
-
-  const dernierePlage = plages[plages.length - 1];
-  const autoClose = new Date(start);
-  autoClose.setHours(Math.floor(dernierePlage.fin / 60), dernierePlage.fin % 60, 0, 0);
-
-  return autoClose.toISOString();
-}
-
-/**
- * Calcule le temps de travail en MINUTES pour une session,
- * en tenant compte des horaires d'usine.
- */
 export function getSessionTempsTravail(session: { started_at: string; ended_at: string | null }): number {
   return calculerTempsTravail(session.started_at, session.ended_at);
 }
 
 /**
- * Utilitaire : formate une durée en minutes en texte court pour affichage.
+ * Format pour l'affichage des jours en heures (délais calendaires)
  */
-export function formatDureeCourte(minutes: number): string {
-  if (minutes < 60) return `${minutes}min`;
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  if (h > 24) {
-    const j = Math.floor(h / 24);
-    const reste = h % 24;
-    return `${j}j${reste}h`;
-  }
-  if (m === 0) return `${h}h`;
-  return `${h}h${m.toString().padStart(2, "0")}`;
+export function formatDelaiEnHeures(jours: number): string {
+  const minutes = jours * 8 * 60;
+  return formatDureeMinutes(minutes);
 }

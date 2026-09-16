@@ -17,9 +17,8 @@ import {
   type EquipementAnalyse,
   type SessionAnalyse,
 } from "../lib/optimization";
-import { calculerTempsTravail } from "../lib/workTime";
+import { calculerTempsTravail, formatJoursEnHeures } from "../lib/workTime";
 
-// --- TYPES ---
 interface Equipement {
   id: string;
   client_name: string;
@@ -104,7 +103,6 @@ export default function RapportsPage() {
   const now = new Date();
   const todayStr = now.toISOString().slice(0, 10);
 
-  // --- BORNES ---
   const bounds = useMemo(() => {
     const startOfDay = new Date(now); startOfDay.setHours(0, 0, 0, 0);
     const endOfDay = new Date(now); endOfDay.setHours(23, 59, 59, 999);
@@ -165,7 +163,6 @@ export default function RapportsPage() {
     return set;
   }, [equipementsActifs, passages]);
 
-  // --- KPIs ACTIVITÉ ---
   const kpisActivite = useMemo(() => {
     const vus = vusIds.size;
     const passagesCount = passagesInPeriod.length;
@@ -176,7 +173,6 @@ export default function RapportsPage() {
     return { vus, passagesCount, nouveaux, nonVus, stagnationRate };
   }, [vusIds, passagesInPeriod, equipementsInPeriod, equipementsActifs, stagnantIds]);
 
-  // --- KPIs PERFORMANCE ---
   const kpisPerformance = useMemo(() => {
     const sessionsByEquipement = new Map<string, SessionAnalyse[]>();
     sessions.forEach((s) => {
@@ -260,14 +256,9 @@ export default function RapportsPage() {
     return { efficaciteMoyenne, nbTermines: analyses.length, surDurees, topOperateurs };
   }, [equipementsInPeriod, equipements, sessions, sessionsInPeriod, coefficients, operateurs]);
 
-  // --- KPIs FINANCIER ---
   const kpisFinancier = useMemo(() => {
     const totalParType = {
-      piece: 0,
-      sous_traitance: 0,
-      transport: 0,
-      consommable: 0,
-      main_oeuvre: 0,
+      piece: 0, sous_traitance: 0, transport: 0, consommable: 0, main_oeuvre: 0,
     };
 
     lignesCoutInPeriod.forEach((l) => {
@@ -299,7 +290,6 @@ export default function RapportsPage() {
     return { totalParType, totalHT, topEquipementsChers, coutMoyen, nbEquipementsAvecCouts: parEquipement.size };
   }, [lignesCoutInPeriod, equipements]);
 
-  // --- KPIs CLIENT ---
   const kpisClient = useMemo(() => {
     const parClient = new Map<string, {
       nbEquipements: number;
@@ -312,11 +302,7 @@ export default function RapportsPage() {
     equipementsInPeriod.forEach((e) => {
       if (!parClient.has(e.client_name)) {
         parClient.set(e.client_name, {
-          nbEquipements: 0,
-          nbEnCours: 0,
-          nbLivres: 0,
-          tempsTotalMin: 0,
-          coutTotal: 0,
+          nbEquipements: 0, nbEnCours: 0, nbLivres: 0, tempsTotalMin: 0, coutTotal: 0,
         });
       }
       const entry = parClient.get(e.client_name)!;
@@ -341,7 +327,6 @@ export default function RapportsPage() {
     })).sort((a, b) => b.nbEquipements - a.nbEquipements);
   }, [equipementsInPeriod, sessions, lignesCout]);
 
-  // --- AUTRES STATS ---
   const passagesParMois = useMemo(() => {
     const arr = Array(12).fill(0);
     passages.filter((p) => new Date(p.passage_date).getFullYear() === now.getFullYear())
@@ -368,7 +353,6 @@ export default function RapportsPage() {
     })).filter((t) => t.count > 0).sort((a, b) => b.count - a.count);
   }, [operateurs, passagesInPeriod]);
 
-  // --- PDF ---
   const handleDownloadPdf = async () => {
     setDownloading(true);
     try {
@@ -717,7 +701,7 @@ export default function RapportsPage() {
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-semibold text-slate-800 truncate">{op.nom}</p>
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          {op.nb_equipements} equipement{op.nb_equipements > 1 ? "s" : ""} · {op.temps_reel_jours}j reel / {op.temps_attendu_jours}j attendu
+                          {op.nb_equipements} equipement{op.nb_equipements > 1 ? "s" : ""} · {formatJoursEnHeures(op.temps_reel_jours)} reel
                         </p>
                       </div>
                       <div className="text-right shrink-0">
@@ -747,7 +731,7 @@ export default function RapportsPage() {
                       <span className="text-slate-400 text-xs"> ({getTranchePuissance(eq.puissance_kw)})</span>
                     </span>
                     <span className="flex items-center gap-2">
-                      <span className="text-slate-500">{analyse.temps_reel_jours}j</span>
+                      <span className="text-slate-500">{formatJoursEnHeures(analyse.temps_reel_jours)}</span>
                       <span className="text-[10px] bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-bold">
                         +{analyse.depassement_pourcentage}%
                       </span>
@@ -848,7 +832,7 @@ export default function RapportsPage() {
           <div className="bg-white rounded-xl p-4 shadow-sm flex items-start gap-2">
             <Info size={14} className="text-blue-600 shrink-0 mt-0.5" />
             <p className="text-xs text-blue-800">
-              <strong>Info :</strong> Statistiques globales par client sur la periode. Pour un rapport PDF detaille d'un client, utilisez la page <strong>Vue Client</strong>.
+              <strong>Info :</strong> Statistiques globales par client sur la periode. Pour un rapport PDF detaille d'un client, utilisez la page <strong>Répertoire équipements</strong>.
             </p>
           </div>
 
@@ -896,7 +880,7 @@ export default function RapportsPage() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-slate-800 truncate">{c.client_name}</p>
                       <p className="text-[11px] text-slate-500 mt-0.5">
-                        {c.nbEnCours} en cours · {c.nbLivres} livre{c.nbLivres > 1 ? "s" : ""} · {Math.round(c.tempsTotalMin / 60)}h de travail
+                        {c.nbEnCours} en cours · {c.nbLivres} livre{c.nbLivres > 1 ? "s" : ""}
                       </p>
                     </div>
                     <div className="text-right shrink-0">

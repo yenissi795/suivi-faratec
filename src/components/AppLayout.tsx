@@ -16,7 +16,7 @@ const links = [
   { to: "/operateurs", label: "Opérateurs", icon: Users },
   { to: "/temps-operateurs", label: "Temps opérateurs", icon: Timer },
   { to: "/couts", label: "Coûts", icon: Calculator },  
-  { to: "/vue-client", label: "Vue Client", icon: Eye },
+  { to: "/vue-client", label: "Répertoire équipements", icon: Eye },
   { to: "/optimisation", label: "Optimisation", icon: TrendingUp },                  // ← AJOUT
   { to: "/rapports", label: "Rapports", icon: FileBarChart },
   { to: "/parametres", label: "Paramètres", icon: Settings },

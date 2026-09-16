@@ -2,7 +2,7 @@ import { useEffect, useState, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { Users, Clock, Award, Timer, Calendar, Loader2, Info, Package } from "lucide-react";
 import { calculerStatsParOperateur, getEfficaciteColor, SEUIL_MIN_EQUIPEMENTS } from "../lib/optimization";
-import { calculerTempsTravail } from "../lib/workTime";
+import { calculerTempsTravail, formatDureeMinutes, formatJoursEnHeures } from "../lib/workTime";
 
 interface Operateur { id: string; full_name: string; is_active: boolean; }
 
@@ -40,7 +40,7 @@ interface Coefficient {
   tolerance_pourcentage: number;
 }
 
-type PeriodType = "jour" | "semaine" | "mois" | "annee" | "tout";
+type PeriodType = "semaine" | "mois" | "annee" | "tout";
 
 export default function TempsOperateursPage() {
   const [operateurs, setOperateurs] = useState<Operateur[]>([]);
@@ -74,16 +74,9 @@ export default function TempsOperateursPage() {
 
   useEffect(() => { load(); }, []);
 
-  // --- BORNES DE PÉRIODE ---
   const periodBounds = useMemo(() => {
     const now = new Date();
     if (period === "tout") return { start: new Date("1970-01-01"), end: new Date("2100-01-01"), label: "Tout l'historique" };
-
-    if (period === "jour") {
-      const start = new Date(now); start.setHours(0, 0, 0, 0);
-      const end = new Date(now); end.setHours(23, 59, 59, 999);
-      return { start, end, label: "Aujourd'hui" };
-    }
 
     if (period === "semaine") {
       const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
@@ -134,7 +127,6 @@ export default function TempsOperateursPage() {
     return calculerStatsParOperateur(filteredSessions, equipementsMap, coefficients, operateursMap);
   }, [filteredSessions, equipementsMap, coefficients, operateursMap]);
 
-  // --- STATS DÉTAILLÉES PAR OPÉRATEUR (nb équipements distincts + nb sessions) ---
   const statsDetaillees = useMemo(() => {
     const parOperateur = new Map<string, {
       equipementsDistincts: Set<string>;
@@ -160,7 +152,6 @@ export default function TempsOperateursPage() {
       const minutes = calculerTempsTravail(s.started_at, s.ended_at);
       entry.tempsTotalMin += minutes;
 
-      // Détails par équipement
       if (!entry.equipementsDetails.has(s.equipement_id)) {
         entry.equipementsDetails.set(s.equipement_id, {
           code: s.equipements?.code_faratec || "—",
@@ -197,6 +188,11 @@ export default function TempsOperateursPage() {
     return statsDetaillees.find((s) => s.operateur_id === selectedOperateurId);
   }, [selectedOperateurId, statsDetaillees]);
 
+  const statsEfficaciteSelected = useMemo(() => {
+    if (!selectedOperateurId) return null;
+    return statsAvecEfficacite.find((s) => s.operateur_id === selectedOperateurId);
+  }, [selectedOperateurId, statsAvecEfficacite]);
+
   const formatTime = (iso: string) =>
     new Date(iso).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 
@@ -204,7 +200,6 @@ export default function TempsOperateursPage() {
     new Date(iso).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" });
 
   const periodTabs: { key: PeriodType; label: string }[] = [
-    { key: "jour", label: "Aujourd'hui" },
     { key: "semaine", label: "Cette semaine" },
     { key: "mois", label: "Ce mois" },
     { key: "annee", label: "Cette année" },
@@ -215,23 +210,10 @@ export default function TempsOperateursPage() {
     const totalMin = filteredSessions.reduce((sum, s) => sum + calculerTempsTravail(s.started_at, s.ended_at), 0);
     const totalSessions = filteredSessions.length;
     const operateursActifs = new Set(filteredSessions.map((s) => s.operateur_id)).size;
-    // Nombre total d'équipements distincts touchés par TOUS les opérateurs
     const tousEquipementsDistincts = new Set(filteredSessions.map((s) => s.equipement_id)).size;
     const best = statsAvecEfficacite.find((s) => s.a_assez_de_donnees);
     return { totalMin, totalSessions, operateursActifs, tousEquipementsDistincts, best };
   }, [filteredSessions, statsAvecEfficacite]);
-
-  const formatDureeMin = (min: number): string => {
-    if (min < 60) return `${Math.round(min)}min`;
-    const h = Math.floor(min / 60);
-    const m = Math.round(min % 60);
-    if (h > 24) {
-      const j = Math.floor(h / 24);
-      const reste = h % 24;
-      return `${j}j ${reste}h`;
-    }
-    return `${h}h${m.toString().padStart(2, "0")}`;
-  };
 
   return (
     <div className="space-y-6">
@@ -248,7 +230,7 @@ export default function TempsOperateursPage() {
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 flex items-start gap-2">
         <Info size={14} className="text-blue-600 shrink-0 mt-0.5" />
         <p className="text-xs text-blue-800">
-          <strong>Note :</strong> Le nombre d'équipements affiché correspond aux équipements <strong>distincts</strong> touchés (si un opérateur travaille 3 fois sur le même équipement, il compte pour 1). L'efficacité n'est calculée que sur les équipements terminés (min {SEUIL_MIN_EQUIPEMENTS}).
+          <strong>Note :</strong> Tous les temps sont en <strong>heures</strong>. Le nombre d'équipements correspond aux équipements <strong>distincts</strong> (un même équipement touché plusieurs fois = 1). L'efficacité se base uniquement sur les équipements <strong>terminés</strong> (min {SEUIL_MIN_EQUIPEMENTS}).
         </p>
       </div>
 
@@ -273,13 +255,12 @@ export default function TempsOperateursPage() {
         </div>
       ) : (
         <>
-          {/* KPIs GLOBAUX */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-amber-500">
               <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
                 <Timer size={10} /> Temps total
               </p>
-              <p className="text-2xl font-bold text-slate-800">{formatDureeMin(statsGlobales.totalMin)}</p>
+              <p className="text-2xl font-bold text-slate-800">{formatDureeMinutes(statsGlobales.totalMin)}</p>
             </div>
             <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-blue-500">
               <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
@@ -306,7 +287,6 @@ export default function TempsOperateursPage() {
             </div>
           </div>
 
-          {/* --- CLASSEMENT PAR ÉQUIPEMENTS TOUCHÉS --- */}
           {statsDetaillees.length > 0 && (
             <div className="bg-white rounded-xl shadow-sm overflow-hidden">
               <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-green-50 to-white">
@@ -315,7 +295,7 @@ export default function TempsOperateursPage() {
                   Classement par équipements touchés ({statsDetaillees.length})
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Nombre d'équipements <strong>distincts</strong> par opérateur sur la période
+                  Nombre d'équipements <strong>distincts</strong> par opérateur
                 </p>
               </div>
               <div className="divide-y divide-slate-100">
@@ -338,7 +318,7 @@ export default function TempsOperateursPage() {
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-semibold text-slate-800 truncate">{s.operateur_nom}</p>
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          {s.nb_sessions} session{s.nb_sessions > 1 ? "s" : ""} · {formatDureeMin(s.temps_total_min)} de travail
+                          {s.nb_sessions} session{s.nb_sessions > 1 ? "s" : ""} · {formatDureeMinutes(s.temps_total_min)} de travail
                         </p>
                       </div>
                       <div className="text-right shrink-0">
@@ -352,7 +332,6 @@ export default function TempsOperateursPage() {
             </div>
           )}
 
-          {/* --- CLASSEMENT PAR EFFICACITÉ --- */}
           {statsAvecEfficacite.length > 0 && (
             <div className="bg-white rounded-xl shadow-sm overflow-hidden">
               <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-emerald-50 to-white">
@@ -361,13 +340,14 @@ export default function TempsOperateursPage() {
                   Classement par efficacité
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Basé sur les équipements terminés (min {SEUIL_MIN_EQUIPEMENTS})
+                  Basé sur les équipements terminés (min {SEUIL_MIN_EQUIPEMENTS}) · Pondéré par le temps passé
                 </p>
               </div>
               <div className="divide-y divide-slate-100">
                 {statsAvecEfficacite.map((s, i) => {
                   const color = getEfficaciteColor(s.efficacite);
                   const podium = ["bg-amber-500 text-white", "bg-slate-300 text-slate-800", "bg-amber-700 text-white"];
+                  const isSelected = selectedOperateurId === s.operateur_id;
 
                   if (!s.a_assez_de_donnees) {
                     return (
@@ -389,7 +369,13 @@ export default function TempsOperateursPage() {
                   }
 
                   return (
-                    <div key={s.operateur_id} className="p-4 flex items-center gap-3">
+                    <button
+                      key={s.operateur_id}
+                      onClick={() => setSelectedOperateurId(isSelected ? "" : s.operateur_id)}
+                      className={`w-full p-4 flex items-center gap-3 text-left transition ${
+                        isSelected ? "bg-amber-50" : "hover:bg-slate-50/60"
+                      }`}
+                    >
                       <span className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
                         i < 3 ? podium[i] : "bg-slate-100 text-slate-600"
                       }`}>
@@ -398,7 +384,7 @@ export default function TempsOperateursPage() {
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-semibold text-slate-800 truncate">{s.operateur_nom}</p>
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          {s.nb_equipements} équipement{s.nb_equipements > 1 ? "s" : ""} · {s.temps_reel_jours}j réel / {s.temps_attendu_jours}j attendu
+                          {s.nb_equipements} équipement{s.nb_equipements > 1 ? "s" : ""} · {formatJoursEnHeures(s.temps_reel_jours)} de travail
                         </p>
                       </div>
                       <div className="text-right shrink-0">
@@ -407,14 +393,13 @@ export default function TempsOperateursPage() {
                           {color.label}
                         </span>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
             </div>
           )}
 
-          {/* --- DÉTAIL OPÉRATEUR SÉLECTIONNÉ --- */}
           {selectedOperateurId && statsDetailleesSelected && (
             <div className="bg-white rounded-xl shadow-sm overflow-hidden">
               <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-amber-50 to-white">
@@ -423,11 +408,35 @@ export default function TempsOperateursPage() {
                   Détail — {statsDetailleesSelected.operateur_nom}
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  {statsDetailleesSelected.nb_equipements_distincts} équipement{statsDetailleesSelected.nb_equipements_distincts > 1 ? "s" : ""} distinct{statsDetailleesSelected.nb_equipements_distincts > 1 ? "s" : ""} · {statsDetailleesSelected.nb_sessions} session{statsDetailleesSelected.nb_sessions > 1 ? "s" : ""} · {formatDureeMin(statsDetailleesSelected.temps_total_min)}
+                  {statsDetailleesSelected.nb_equipements_distincts} équipement{statsDetailleesSelected.nb_equipements_distincts > 1 ? "s" : ""} distinct{statsDetailleesSelected.nb_equipements_distincts > 1 ? "s" : ""} · {statsDetailleesSelected.nb_sessions} session{statsDetailleesSelected.nb_sessions > 1 ? "s" : ""} · {formatDureeMinutes(statsDetailleesSelected.temps_total_min)}
                 </p>
+                {statsEfficaciteSelected?.a_assez_de_donnees && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="text-xs text-slate-500">Efficacité :</span>
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${getEfficaciteColor(statsEfficaciteSelected.efficacite).bg} ${getEfficaciteColor(statsEfficaciteSelected.efficacite).text}`}>
+                      {statsEfficaciteSelected.efficacite}% ({getEfficaciteColor(statsEfficaciteSelected.efficacite).label})
+                    </span>
+                  </div>
+                )}
               </div>
 
-              {/* Liste des équipements touchés */}
+              {statsEfficaciteSelected?.a_assez_de_donnees && statsEfficaciteSelected.details_equipements && statsEfficaciteSelected.details_equipements.length > 0 && (
+                <div className="p-4 border-b border-slate-100 bg-emerald-50/30">
+                  <p className="text-[10px] uppercase tracking-wider text-emerald-700 font-bold mb-2">Équipements terminés contribués</p>
+                  <div className="space-y-1">
+                    {statsEfficaciteSelected.details_equipements.map((d) => (
+                      <div key={d.equipement_id} className="flex items-center justify-between text-xs">
+                        <span className="text-slate-700 font-medium">{d.code_faratec}</span>
+                        <div className="flex items-center gap-3">
+                          <span className="text-slate-500">{formatJoursEnHeures(d.temps_operateur_jours)} / {formatJoursEnHeures(d.temps_total_equipement_jours)}</span>
+                          <span className={`font-bold ${getEfficaciteColor(d.efficacite_equipement).text}`}>{d.efficacite_equipement}%</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="divide-y divide-slate-100">
                 <div className="p-3 bg-slate-50/50">
                   <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Équipements touchés</p>
@@ -440,14 +449,13 @@ export default function TempsOperateursPage() {
                         <span className="text-slate-500"> · {eq.client}</span>
                       </p>
                       <p className="text-[11px] text-slate-500 mt-0.5">
-                        {eq.sessions} session{eq.sessions > 1 ? "s" : ""} · {formatDureeMin(eq.tempsMin)}
+                        {eq.sessions} session{eq.sessions > 1 ? "s" : ""} · {formatDureeMinutes(eq.tempsMin)}
                       </p>
                     </div>
                   </div>
                 ))}
               </div>
 
-              {/* Sessions détaillées */}
               <div className="border-t border-slate-100">
                 <div className="p-3 bg-slate-50/50">
                   <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">Toutes les sessions</p>
@@ -468,7 +476,7 @@ export default function TempsOperateursPage() {
                           </p>
                         </div>
                         <div className="text-right shrink-0">
-                          <p className="text-sm font-bold text-amber-700">{formatDureeMin(minutes)}</p>
+                          <p className="text-sm font-bold text-amber-700">{formatDureeMinutes(minutes)}</p>
                           {!s.ended_at && (
                             <span className="text-[9px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-bold">
                               EN COURS

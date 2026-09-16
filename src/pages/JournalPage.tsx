@@ -7,11 +7,12 @@ import {
   History, CheckCircle2, Clock, Package, Truck, Edit3, AlertTriangle,
   Filter, Loader2, Plus, Sparkles, ZoomIn, Wrench, Zap, PlusCircle,
   Hourglass, PlayCircle, Flag, Timer, CalendarClock, StopCircle, User,
-  Calculator,
+  Calculator, CalendarDays,
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
-import { calculerTempsTravail, formatDureeMinutes, getSessionAutoCloseDate } from "../lib/workTime";
+import { calculerTempsTravail, formatDureeMinutes } from "../lib/workTime";
 import { analyserEquipement, type CoefficientTravail } from "../lib/optimization";
+import { useToast } from "../context/ToastContext";
 
 // --- TYPES ---
 interface Equipement {
@@ -105,6 +106,12 @@ const getWeekNumber = (date: Date): number => {
   return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
 };
 
+// --- Convertir une date locale en ISO pour datetime-local ---
+const toDateTimeLocal = (date: Date): string => {
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
 type StatutKey = "en_attente" | "en_cours" | "termine" | "livre";
 
 const getStatutInfo = (statut: string, pourcentage: number): { key: StatutKey; label: string; color: string; icon: any } => {
@@ -124,6 +131,7 @@ const EMPTY_NEW_EQ = {
 export default function JournalPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [savingIntervention, setSavingIntervention] = useState(false);
@@ -152,6 +160,7 @@ export default function JournalPage() {
   const [typeTravailId, setTypeTravailId] = useState("");
   const [pourcentage, setPourcentage] = useState("");
   const [commentaire, setCommentaire] = useState("");
+  const [heureDebutSaisie, setHeureDebutSaisie] = useState("");
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -207,18 +216,6 @@ export default function JournalPage() {
     setPassages((passRes.data as unknown as Passage[]) || []);
 
     let allSessions = (sessRes.data as unknown as SessionOperateur[]) || [];
-
-    // Fermeture auto des sessions orphelines
-    const orphelines = allSessions.filter((s) => !s.ended_at && getSessionAutoCloseDate(s.started_at) !== null);
-    if (orphelines.length > 0) {
-      for (const s of orphelines) {
-        const autoCloseDate = getSessionAutoCloseDate(s.started_at);
-        if (autoCloseDate) {
-          await supabase.from("interventions_operateurs").update({ ended_at: autoCloseDate }).eq("id", s.id);
-          s.ended_at = autoCloseDate;
-        }
-      }
-    }
 
     setSessions(allSessions);
     setTourneeActive(tourneeRes.data && tourneeRes.data.length > 0 ? (tourneeRes.data[0] as Tournee) : null);
@@ -277,6 +274,89 @@ export default function JournalPage() {
     return map;
   }, [sessions]);
 
+  // --- DONNÉES DE RECHERCHE PAR ÉQUIPEMENT (opérateurs, ateliers, etc.) ---
+  const searchIndexParEquipement = useMemo(() => {
+    const map = new Map<string, {
+      operateurs: Set<string>;
+      dernierOperateur: string;
+      ateliers: Set<string>;
+      dernierAtelier: string;
+      typesTravaux: Set<string>;
+      commentaires: Set<string>;
+    }>();
+
+    // 1. Depuis les passages
+    passages.forEach((p) => {
+      if (!map.has(p.equipement_id)) {
+        map.set(p.equipement_id, {
+          operateurs: new Set(),
+          dernierOperateur: "",
+          ateliers: new Set(),
+          dernierAtelier: "",
+          typesTravaux: new Set(),
+          commentaires: new Set(),
+        });
+      }
+      const entry = map.get(p.equipement_id)!;
+      if (p.operateurs?.full_name) entry.operateurs.add(p.operateurs.full_name.toLowerCase());
+      if (p.ateliers?.name) entry.ateliers.add(p.ateliers.name.toLowerCase());
+      if (p.types_travaux?.name) entry.typesTravaux.add(p.types_travaux.name.toLowerCase());
+      if (p.commentaire) entry.commentaires.add(p.commentaire.toLowerCase());
+    });
+
+    // 2. Le premier passage = le plus récent (car passages triés desc)
+    const dernierPassageParEq = new Map<string, Passage>();
+    passages.forEach((p) => {
+      if (!dernierPassageParEq.has(p.equipement_id)) {
+        dernierPassageParEq.set(p.equipement_id, p);
+      }
+    });
+    dernierPassageParEq.forEach((p, eqId) => {
+      const entry = map.get(eqId);
+      if (entry) {
+        entry.dernierOperateur = (p.operateurs?.full_name || "").toLowerCase();
+        entry.dernierAtelier = (p.ateliers?.name || "").toLowerCase();
+      }
+    });
+
+    // 3. Depuis les sessions opérateurs (même non terminées)
+    sessions.forEach((s) => {
+      if (!map.has(s.equipement_id)) {
+        map.set(s.equipement_id, {
+          operateurs: new Set(),
+          dernierOperateur: "",
+          ateliers: new Set(),
+          dernierAtelier: "",
+          typesTravaux: new Set(),
+          commentaires: new Set(),
+        });
+      }
+      const entry = map.get(s.equipement_id)!;
+      if (s.operateurs?.full_name) entry.operateurs.add(s.operateurs.full_name.toLowerCase());
+      if (s.ateliers?.name) entry.ateliers.add(s.ateliers.name.toLowerCase());
+    });
+
+    // 4. Depuis le champ "operateur" de l'équipement (opérateur assigné)
+    equipements.forEach((e) => {
+      if (e.operateur && map.has(e.id)) {
+        map.get(e.id)!.operateurs.add(e.operateur.toLowerCase());
+      }
+    });
+
+    return map;
+  }, [passages, sessions, equipements]);
+
+  // --- VÉRIFIER SI L'OPÉRATEUR A DÉJÀ UNE SESSION ACTIVE SUR CET ÉQUIPEMENT ---
+  const hasActiveSession = useMemo(() => {
+    if (!selectedEquipement || !operateurId) return false;
+    return sessions.some(
+      (s) =>
+        s.equipement_id === selectedEquipement.id &&
+        s.operateur_id === operateurId &&
+        !s.ended_at
+    );
+  }, [selectedEquipement, operateurId, sessions]);
+
   const statsStatuts = useMemo(() => {
     const enCoursList = equipements.filter((e) => e.statut !== "livre");
     const enAttente = enCoursList.filter((e) => e.pourcentage_global === 0).length;
@@ -305,12 +385,41 @@ export default function JournalPage() {
     }
 
     if (searchTerm) {
-      const s = searchTerm.toLowerCase();
-      list = list.filter((e) =>
-        e.client_name.toLowerCase().includes(s) ||
-        (e.code_faratec && e.code_faratec.toLowerCase().includes(s)) ||
-        e.type_equipement.toLowerCase().includes(s)
-      );
+      const s = searchTerm.toLowerCase().trim();
+      list = list.filter((e) => {
+        // 1. Champs directs de l'équipement
+        if (
+          e.client_name.toLowerCase().includes(s) ||
+          (e.code_faratec && e.code_faratec.toLowerCase().includes(s)) ||
+          e.type_equipement.toLowerCase().includes(s) ||
+          (e.marque && e.marque.toLowerCase().includes(s)) ||
+          (e.nature_travaux && e.nature_travaux.toLowerCase().includes(s)) ||
+          (e.mle_reference && e.mle_reference.toLowerCase().includes(s)) ||
+          (e.ndi_da_ns && e.ndi_da_ns.toLowerCase().includes(s)) ||
+          (e.tension && e.tension.toLowerCase().includes(s)) ||
+          (e.vitesse && e.vitesse.toLowerCase().includes(s)) ||
+          (e.operateur && e.operateur.toLowerCase().includes(s))
+        ) {
+          return true;
+        }
+
+        // 2. Champs calculés (opérateurs, ateliers, types de travaux...)
+        const idx = searchIndexParEquipement.get(e.id);
+        if (!idx) return false;
+
+        if (
+          idx.dernierOperateur.includes(s) ||
+          idx.dernierAtelier.includes(s) ||
+          Array.from(idx.operateurs).some((op) => op.includes(s)) ||
+          Array.from(idx.ateliers).some((at) => at.includes(s)) ||
+          Array.from(idx.typesTravaux).some((tt) => tt.includes(s)) ||
+          Array.from(idx.commentaires).some((c) => c.includes(s))
+        ) {
+          return true;
+        }
+
+        return false;
+      });
     }
 
     list.sort((a, b) => {
@@ -320,19 +429,34 @@ export default function JournalPage() {
     });
 
     return list;
-  }, [equipements, searchTerm, filterMode, passages, dernierPassageMap]);
+  }, [equipements, searchTerm, filterMode, passages, dernierPassageMap, searchIndexParEquipement]);
 
   const equipementsLivres = useMemo(() => {
     let list = equipements.filter((e) => e.statut === "livre");
     if (searchTerm) {
-      const s = searchTerm.toLowerCase();
-      list = list.filter((e) =>
-        e.client_name.toLowerCase().includes(s) ||
-        (e.code_faratec && e.code_faratec.toLowerCase().includes(s))
-      );
+      const s = searchTerm.toLowerCase().trim();
+      list = list.filter((e) => {
+        if (
+          e.client_name.toLowerCase().includes(s) ||
+          (e.code_faratec && e.code_faratec.toLowerCase().includes(s)) ||
+          e.type_equipement.toLowerCase().includes(s) ||
+          (e.marque && e.marque.toLowerCase().includes(s)) ||
+          (e.nature_travaux && e.nature_travaux.toLowerCase().includes(s)) ||
+          (e.mle_reference && e.mle_reference.toLowerCase().includes(s)) ||
+          (e.ndi_da_ns && e.ndi_da_ns.toLowerCase().includes(s))
+        ) {
+          return true;
+        }
+        const idx = searchIndexParEquipement.get(e.id);
+        if (!idx) return false;
+        return (
+          idx.dernierOperateur.includes(s) ||
+          Array.from(idx.operateurs).some((op) => op.includes(s))
+        );
+      });
     }
     return list;
-  }, [equipements, searchTerm]);
+  }, [equipements, searchTerm, searchIndexParEquipement]);
 
   // --- TOURNÉE ---
   const handleStartTournee = async () => {
@@ -427,6 +551,7 @@ export default function JournalPage() {
     setEquipements((prev) => [newEquipement, ...prev]);
     setNewEqSaving(false);
     closeCreate();
+    showToast(`Equipement ${newEquipement.code_faratec || "sans code"} cree`, "success");
     openObservation(newEquipement);
   };
 
@@ -438,6 +563,7 @@ export default function JournalPage() {
     setOperateurId("");
     setTypeTravailId("");
     setCommentaire("");
+    setHeureDebutSaisie(toDateTimeLocal(new Date()));
     setPhotoFile(null);
     setPhotoPreview(null);
     setErrors({});
@@ -447,6 +573,7 @@ export default function JournalPage() {
     setSelectedEquipement(null);
     setPhotoFile(null);
     setPhotoPreview(null);
+    setHeureDebutSaisie("");
   };
 
   const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -456,15 +583,18 @@ export default function JournalPage() {
     setPhotoPreview(URL.createObjectURL(file));
   };
 
-  const demarrerSessionSiNecessaire = async (equipementId: string, opId: string, atId: string): Promise<void> => {
+  const demarrerSessionSiNecessaire = async (equipementId: string, opId: string, atId: string, customStartIso?: string): Promise<void> => {
     if (!user || !opId) return;
     const existing = sessions.find((s) => s.equipement_id === equipementId && s.operateur_id === opId && !s.ended_at);
     if (existing) return;
+
+    const startedAt = customStartIso || new Date().toISOString();
 
     const { data } = await supabase.from("interventions_operateurs").insert({
       equipement_id: equipementId,
       operateur_id: opId,
       atelier_id: atId || null,
+      started_at: startedAt,
       owner_id: user.id,
     }).select("*, operateurs(full_name), ateliers(name)").single();
 
@@ -478,6 +608,7 @@ export default function JournalPage() {
     setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ended_at: now } : s)));
     await supabase.from("interventions_operateurs").update({ ended_at: now }).eq("id", sessionId);
     setStoppingSession(null);
+    showToast("Session operateur arretee", "info");
   };
 
   const handleSaveObservation = async () => {
@@ -501,7 +632,7 @@ export default function JournalPage() {
       const fileName = `${user.id}/${Date.now()}_${photoFile.name}`;
       const { data: uploadData } = await supabase.storage.from("journal-photos").upload(fileName, photoFile);
       if (uploadData) {
-        const { data: urlData } = supabase.storage.from("journal-photos").getPublicUrl(uploadData.path);
+        const { data: urlData } = await supabase.storage.from("journal-photos").getPublicUrl(uploadData.path);
         photoUrl = urlData.publicUrl;
       }
     }
@@ -548,11 +679,19 @@ export default function JournalPage() {
     await supabase.from("equipements").update(updateData).eq("id", selectedEquipement.id);
 
     if (operateurId) {
-      await demarrerSessionSiNecessaire(selectedEquipement.id, operateurId, atelierId);
+      let customStartIso: string | undefined = undefined;
+      if (heureDebutSaisie && !hasActiveSession) {
+        const localDate = new Date(heureDebutSaisie);
+        customStartIso = localDate.toISOString();
+      }
+      await demarrerSessionSiNecessaire(selectedEquipement.id, operateurId, atelierId, customStartIso);
     }
 
     setSaving(false);
+
     closeObservation();
+
+    showToast(`Observation enregistree - ${selectedEquipement.code_faratec || "Sans code"} a ${newPct}%`, "success");
   };
 
   const handleTerminerIntervention = async (id: string) => {
@@ -562,6 +701,8 @@ export default function JournalPage() {
     setEquipements((prev) => prev.map((e) => (e.id === id ? { ...e, date_fin_intervention: now } : e)));
     await supabase.from("equipements").update({ date_fin_intervention: now }).eq("id", id);
     setSavingIntervention(false);
+    const eq = equipements.find((e) => e.id === id);
+    showToast(`Intervention ${eq?.code_faratec || ""} terminee`, "success");
   };
 
   const handleMarquerLivre = async (id: string) => {
@@ -576,6 +717,7 @@ export default function JournalPage() {
       statut: "livre",
       date_livraison_reelle: new Date().toISOString().slice(0, 10),
     }).eq("id", id);
+    showToast(`Equipement ${eq.code_faratec || "sans code"} marque comme livre`, "success");
   };
 
   // --- ÉDITION ---
@@ -648,7 +790,10 @@ export default function JournalPage() {
     }).eq("id", editingEquipement.id);
 
     setEditSaving(false);
+
     closeEdit();
+
+    showToast(`Equipement ${updated.code_faratec || "sans code"} modifie`, "success");
   };
 
   const getHistorique = (equipementId: string) => passages.filter((p) => p.equipement_id === equipementId);
@@ -919,7 +1064,7 @@ export default function JournalPage() {
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
             <input
               type="text"
-              placeholder="Rechercher par code faratec, client ou type..."
+              placeholder="Rechercher : code, client, type, opérateur, atelier, nature..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
@@ -1407,7 +1552,7 @@ export default function JournalPage() {
                   <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
                   <SearchableSelect
                     value={operateurId}
-                    onChange={(val) => setOperateurId(val)}
+                    onChange={(val) => { setOperateurId(val); }}
                     options={operateurs.map((o) => ({ value: o.id, label: o.full_name }))}
                     placeholder="Optionnel"
                     searchPlaceholder="Rechercher un opérateur..."
@@ -1415,6 +1560,37 @@ export default function JournalPage() {
                   />
                 </div>
               </div>
+
+              {operateurId && !hasActiveSession && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <label className="text-xs font-medium text-amber-800 block mb-1.5 flex items-center gap-1">
+                    <CalendarDays size={12} />
+                    Heure réelle de début de l'intervention
+                  </label>
+                  <input
+                    type="datetime-local"
+                    value={heureDebutSaisie}
+                    onChange={(e) => setHeureDebutSaisie(e.target.value)}
+                    max={toDateTimeLocal(new Date())}
+                    className="w-full border border-amber-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none bg-white"
+                  />
+                  <p className="text-[10px] text-amber-700 mt-1.5">
+                    Si l'opérateur a commencé avant votre passage, saisissez l'heure réelle. Sinon, laissez tel quel.
+                  </p>
+                </div>
+              )}
+
+              {operateurId && hasActiveSession && (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3 flex items-start gap-2">
+                  <Clock size={14} className="text-emerald-700 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-medium text-emerald-800">Session déjà en cours</p>
+                    <p className="text-[10px] text-emerald-700 mt-0.5">
+                      Cet opérateur travaille déjà sur cet équipement. La session continuera sans redémarrer le chrono.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-medium text-slate-600 block mb-1 flex items-center gap-1">
