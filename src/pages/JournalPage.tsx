@@ -6,10 +6,11 @@ import {
   Camera, X, Play, Square, Search, ChevronDown, ChevronUp,
   History, CheckCircle2, Clock, Package, Truck, Edit3, AlertTriangle,
   Filter, Loader2, Plus, Sparkles, ZoomIn, Wrench, Zap, PlusCircle,
-  Hourglass, PlayCircle, Flag, Timer, CalendarClock, StopCircle, User,
-  Calculator, CalendarDays,
+  Hourglass, PlayCircle, Flag, Timer, CalendarClock, User,
+  Calculator, CalendarDays, Zap as ZapIcon,
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
+import ClientSelect from "../components/ClientSelect";
 import { calculerTempsTravail, formatDureeMinutes } from "../lib/workTime";
 import { analyserEquipement, type CoefficientTravail } from "../lib/optimization";
 import { useToast } from "../context/ToastContext";
@@ -26,6 +27,8 @@ interface Equipement {
   pourcentage_global: number;
   statut: string;
   date_livraison_reelle: string | null;
+  date_fin_prevue: string | null;
+  rapport_etabli: boolean;
   semaine_entree: number | null;
   urgence: string | null;
   ndi_da_ns: string | null;
@@ -106,17 +109,16 @@ const getWeekNumber = (date: Date): number => {
   return Math.ceil((((d.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
 };
 
-// --- Convertir une date locale en ISO pour datetime-local ---
 const toDateTimeLocal = (date: Date): string => {
   const pad = (n: number) => n.toString().padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 };
 
-type StatutKey = "en_attente" | "en_cours" | "termine" | "livre";
+type StatutKey = "en_attente" | "en_cours" | "pret_a_livrer" | "livre";
 
 const getStatutInfo = (statut: string, pourcentage: number): { key: StatutKey; label: string; color: string; icon: any } => {
   if (statut === "livre") return { key: "livre", label: "LIVRÉ", color: "bg-slate-600 text-white", icon: CheckCircle2 };
-  if (pourcentage >= 100) return { key: "termine", label: "TERMINÉ", color: "bg-green-600 text-white", icon: Flag };
+  if (pourcentage >= 100) return { key: "pret_a_livrer", label: "PRÊT À LIVRER", color: "bg-violet-600 text-white", icon: Flag };
   if (pourcentage > 0) return { key: "en_cours", label: "EN COURS", color: "bg-blue-600 text-white", icon: PlayCircle };
   return { key: "en_attente", label: "EN ATTENTE", color: "bg-amber-500 text-white", icon: Hourglass };
 };
@@ -126,7 +128,40 @@ const EMPTY_NEW_EQ = {
   ndi_da_ns: "", mle_reference: "", marque: "",
   puissance_kw: "", tension: "", vitesse: "",
   operateur: "", urgence: "normal", nature_travaux: "",
+  date_fin_prevue: "",
 };
+
+// --- SLIDER 0-100 PAS DE 5 ---
+function PercentageSlider({
+  value,
+  onChange,
+}: {
+  value: number;
+  onChange: (val: number) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-3">
+        <span className="text-xs font-bold text-slate-500 w-6">0%</span>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={5}
+          value={value}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className="flex-1 h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-amber-500"
+        />
+        <span className="text-xs font-bold text-slate-500 w-10 text-right">100%</span>
+      </div>
+      <div className="flex items-center justify-between text-[10px] text-slate-400 px-6">
+        {[0, 25, 50, 75, 100].map((tick) => (
+          <span key={tick}>{tick}%</span>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function JournalPage() {
   const { user } = useAuth();
@@ -134,7 +169,6 @@ export default function JournalPage() {
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [savingIntervention, setSavingIntervention] = useState(false);
   const [stoppingSession, setStoppingSession] = useState<string | null>(null);
   const [, setTick] = useState(0);
 
@@ -150,10 +184,11 @@ export default function JournalPage() {
   const [tourneeActive, setTourneeActive] = useState<Tournee | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterMode, setFilterMode] = useState<"all" | "en_attente" | "en_cours" | "termine" | "not_seen_today" | "stagnant">("all");
+  const [filterMode, setFilterMode] = useState<"all" | "en_attente" | "en_cours" | "pret_a_livrer" | "not_seen_today" | "stagnant">("all");
   const [showLivre, setShowLivre] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
+  // --- OBSERVATION (modale complete) ---
   const [selectedEquipement, setSelectedEquipement] = useState<Equipement | null>(null);
   const [atelierId, setAtelierId] = useState("");
   const [operateurId, setOperateurId] = useState("");
@@ -165,6 +200,17 @@ export default function JournalPage() {
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
+  // --- MAJ RAPIDE ---
+  const [quickUpdateEquipement, setQuickUpdateEquipement] = useState<Equipement | null>(null);
+  const [quickPourcentage, setQuickPourcentage] = useState(0);
+  const [quickSaving, setQuickSaving] = useState(false);
+
+  // --- LIVRAISON ---
+  const [livraisonEquipement, setLivraisonEquipement] = useState<Equipement | null>(null);
+  const [rapportEtabli, setRapportEtabli] = useState(false);
+  const [livraisonSaving, setLivraisonSaving] = useState(false);
+
+  // --- EDITION / CREATION ---
   const [editingEquipement, setEditingEquipement] = useState<Equipement | null>(null);
   const [editForm, setEditForm] = useState({ ...EMPTY_NEW_EQ });
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
@@ -228,6 +274,8 @@ export default function JournalPage() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (zoomedPhoto) setZoomedPhoto(null);
+        else if (livraisonEquipement) closeLivraison();
+        else if (quickUpdateEquipement) closeQuickUpdate();
         else if (selectedEquipement) closeObservation();
         else if (editingEquipement) closeEdit();
         else if (creatingEquipement) closeCreate();
@@ -235,7 +283,7 @@ export default function JournalPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selectedEquipement, editingEquipement, creatingEquipement, zoomedPhoto]);
+  }, [selectedEquipement, editingEquipement, creatingEquipement, zoomedPhoto, quickUpdateEquipement, livraisonEquipement]);
 
   // --- STATS ---
   const statsTournee = useMemo(() => {
@@ -274,7 +322,7 @@ export default function JournalPage() {
     return map;
   }, [sessions]);
 
-  // --- DONNÉES DE RECHERCHE PAR ÉQUIPEMENT (opérateurs, ateliers, etc.) ---
+  // --- DONNEES DE RECHERCHE ---
   const searchIndexParEquipement = useMemo(() => {
     const map = new Map<string, {
       operateurs: Set<string>;
@@ -285,16 +333,12 @@ export default function JournalPage() {
       commentaires: Set<string>;
     }>();
 
-    // 1. Depuis les passages
     passages.forEach((p) => {
       if (!map.has(p.equipement_id)) {
         map.set(p.equipement_id, {
-          operateurs: new Set(),
-          dernierOperateur: "",
-          ateliers: new Set(),
-          dernierAtelier: "",
-          typesTravaux: new Set(),
-          commentaires: new Set(),
+          operateurs: new Set(), dernierOperateur: "",
+          ateliers: new Set(), dernierAtelier: "",
+          typesTravaux: new Set(), commentaires: new Set(),
         });
       }
       const entry = map.get(p.equipement_id)!;
@@ -304,7 +348,6 @@ export default function JournalPage() {
       if (p.commentaire) entry.commentaires.add(p.commentaire.toLowerCase());
     });
 
-    // 2. Le premier passage = le plus récent (car passages triés desc)
     const dernierPassageParEq = new Map<string, Passage>();
     passages.forEach((p) => {
       if (!dernierPassageParEq.has(p.equipement_id)) {
@@ -319,16 +362,12 @@ export default function JournalPage() {
       }
     });
 
-    // 3. Depuis les sessions opérateurs (même non terminées)
     sessions.forEach((s) => {
       if (!map.has(s.equipement_id)) {
         map.set(s.equipement_id, {
-          operateurs: new Set(),
-          dernierOperateur: "",
-          ateliers: new Set(),
-          dernierAtelier: "",
-          typesTravaux: new Set(),
-          commentaires: new Set(),
+          operateurs: new Set(), dernierOperateur: "",
+          ateliers: new Set(), dernierAtelier: "",
+          typesTravaux: new Set(), commentaires: new Set(),
         });
       }
       const entry = map.get(s.equipement_id)!;
@@ -336,7 +375,6 @@ export default function JournalPage() {
       if (s.ateliers?.name) entry.ateliers.add(s.ateliers.name.toLowerCase());
     });
 
-    // 4. Depuis le champ "operateur" de l'équipement (opérateur assigné)
     equipements.forEach((e) => {
       if (e.operateur && map.has(e.id)) {
         map.get(e.id)!.operateurs.add(e.operateur.toLowerCase());
@@ -346,7 +384,6 @@ export default function JournalPage() {
     return map;
   }, [passages, sessions, equipements]);
 
-  // --- VÉRIFIER SI L'OPÉRATEUR A DÉJÀ UNE SESSION ACTIVE SUR CET ÉQUIPEMENT ---
   const hasActiveSession = useMemo(() => {
     if (!selectedEquipement || !operateurId) return false;
     return sessions.some(
@@ -361,8 +398,8 @@ export default function JournalPage() {
     const enCoursList = equipements.filter((e) => e.statut !== "livre");
     const enAttente = enCoursList.filter((e) => e.pourcentage_global === 0).length;
     const enCours = enCoursList.filter((e) => e.pourcentage_global > 0 && e.pourcentage_global < 100).length;
-    const termine = enCoursList.filter((e) => e.pourcentage_global >= 100).length;
-    return { enAttente, enCours, termine };
+    const pretALivrer = enCoursList.filter((e) => e.pourcentage_global >= 100).length;
+    return { enAttente, enCours, pretALivrer };
   }, [equipements]);
 
   const filteredEquipements = useMemo(() => {
@@ -370,7 +407,7 @@ export default function JournalPage() {
 
     if (filterMode === "en_attente") list = list.filter((e) => e.pourcentage_global === 0);
     else if (filterMode === "en_cours") list = list.filter((e) => e.pourcentage_global > 0 && e.pourcentage_global < 100);
-    else if (filterMode === "termine") list = list.filter((e) => e.pourcentage_global >= 100);
+    else if (filterMode === "pret_a_livrer") list = list.filter((e) => e.pourcentage_global >= 100);
     else if (filterMode === "not_seen_today") {
       const todayStr = new Date().toISOString().slice(0, 10);
       const seenTodayIds = new Set(
@@ -387,7 +424,6 @@ export default function JournalPage() {
     if (searchTerm) {
       const s = searchTerm.toLowerCase().trim();
       list = list.filter((e) => {
-        // 1. Champs directs de l'équipement
         if (
           e.client_name.toLowerCase().includes(s) ||
           (e.code_faratec && e.code_faratec.toLowerCase().includes(s)) ||
@@ -403,7 +439,6 @@ export default function JournalPage() {
           return true;
         }
 
-        // 2. Champs calculés (opérateurs, ateliers, types de travaux...)
         const idx = searchIndexParEquipement.get(e.id);
         if (!idx) return false;
 
@@ -440,10 +475,7 @@ export default function JournalPage() {
           e.client_name.toLowerCase().includes(s) ||
           (e.code_faratec && e.code_faratec.toLowerCase().includes(s)) ||
           e.type_equipement.toLowerCase().includes(s) ||
-          (e.marque && e.marque.toLowerCase().includes(s)) ||
-          (e.nature_travaux && e.nature_travaux.toLowerCase().includes(s)) ||
-          (e.mle_reference && e.mle_reference.toLowerCase().includes(s)) ||
-          (e.ndi_da_ns && e.ndi_da_ns.toLowerCase().includes(s))
+          (e.marque && e.marque.toLowerCase().includes(s))
         ) {
           return true;
         }
@@ -458,17 +490,21 @@ export default function JournalPage() {
     return list;
   }, [equipements, searchTerm, searchIndexParEquipement]);
 
-  // --- TOURNÉE ---
+  // --- TOURNEE ---
   const handleStartTournee = async () => {
     if (!user) return;
     const { data } = await supabase.from("tournees").insert({ owner_id: user.id }).select().single();
-    if (data) setTourneeActive(data as Tournee);
+    if (data) {
+      setTourneeActive(data as Tournee);
+      showToast("Tournée démarrée", "success");
+    }
   };
 
   const handleEndTournee = async () => {
     if (!tourneeActive) return;
     await supabase.from("tournees").update({ ended_at: new Date().toISOString() }).eq("id", tourneeActive.id);
     setTourneeActive(null);
+    showToast("Tournée terminée", "success");
   };
 
   // --- GESTION DES TYPES ---
@@ -498,17 +534,13 @@ export default function JournalPage() {
     }
   };
 
-  // --- CRÉATION ---
+  // --- CREATION ---
   const openCreate = () => {
     setCreatingEquipement(true);
     setNewEqForm({ ...EMPTY_NEW_EQ });
     setNewEqErrors({});
   };
-
-  const closeCreate = () => {
-    setCreatingEquipement(false);
-    setNewEqErrors({});
-  };
+  const closeCreate = () => { setCreatingEquipement(false); setNewEqErrors({}); };
 
   const handleCreateEquipement = async () => {
     if (!user) return;
@@ -535,6 +567,7 @@ export default function JournalPage() {
       operateur: newEqForm.operateur.trim() || null,
       urgence: newEqForm.urgence || "normal",
       nature_travaux: newEqForm.nature_travaux || null,
+      date_fin_prevue: newEqForm.date_fin_prevue ? new Date(newEqForm.date_fin_prevue).toISOString() : null,
       owner_id: user.id,
       statut: "en_attente",
       pourcentage_global: 0,
@@ -551,17 +584,21 @@ export default function JournalPage() {
     setEquipements((prev) => [newEquipement, ...prev]);
     setNewEqSaving(false);
     closeCreate();
-    showToast(`Equipement ${newEquipement.code_faratec || "sans code"} cree`, "success");
+    showToast(`Équipement ${newEquipement.code_faratec || "sans code"} créé`, "success");
     openObservation(newEquipement);
   };
 
-  // --- OBSERVATION ---
+  // --- OBSERVATION (pre-remplie avec dernier passage) ---
   const openObservation = (eq: Equipement) => {
     setSelectedEquipement(eq);
     setPourcentage(String(eq.pourcentage_global));
-    setAtelierId("");
-    setOperateurId("");
-    setTypeTravailId("");
+
+    // Pre-remplir avec le dernier passage
+    const lastPassage = dernierPassageMap.get(eq.id);
+    setAtelierId(lastPassage?.atelier_id || "");
+    setOperateurId(lastPassage?.operateur_id || "");
+    setTypeTravailId(lastPassage?.type_travail_id || "");
+
     setCommentaire("");
     setHeureDebutSaisie(toDateTimeLocal(new Date()));
     setPhotoFile(null);
@@ -608,7 +645,7 @@ export default function JournalPage() {
     setSessions((prev) => prev.map((s) => (s.id === sessionId ? { ...s, ended_at: now } : s)));
     await supabase.from("interventions_operateurs").update({ ended_at: now }).eq("id", sessionId);
     setStoppingSession(null);
-    showToast("Session operateur arretee", "info");
+    showToast("Session opérateur arrêtée", "info");
   };
 
   const handleSaveObservation = async () => {
@@ -676,6 +713,9 @@ export default function JournalPage() {
 
     const updateData: Record<string, any> = { pourcentage_global: newPct, statut: nouveauStatut };
     if (isFirstPassage) updateData.date_debut_intervention = dateDebutIntervention;
+    if (newPct >= 100 && !selectedEquipement.date_fin_intervention) {
+      updateData.date_fin_intervention = now;
+    }
     await supabase.from("equipements").update(updateData).eq("id", selectedEquipement.id);
 
     if (operateurId) {
@@ -688,39 +728,129 @@ export default function JournalPage() {
     }
 
     setSaving(false);
-
     closeObservation();
-
-    showToast(`Observation enregistree - ${selectedEquipement.code_faratec || "Sans code"} a ${newPct}%`, "success");
+    showToast(`Observation enregistrée — ${selectedEquipement.code_faratec || "Sans code"} à ${newPct}%`, "success");
   };
 
-  const handleTerminerIntervention = async (id: string) => {
-    if (savingIntervention) return;
-    setSavingIntervention(true);
+  // --- MAJ RAPIDE ---
+  const openQuickUpdate = (eq: Equipement) => {
+    setQuickUpdateEquipement(eq);
+    setQuickPourcentage(eq.pourcentage_global);
+  };
+
+  const closeQuickUpdate = () => {
+    setQuickUpdateEquipement(null);
+    setQuickPourcentage(0);
+  };
+
+  const handleQuickUpdate = async () => {
+    if (!user || !quickUpdateEquipement) return;
+    const newPct = quickPourcentage;
+    const lastPassage = dernierPassageMap.get(quickUpdateEquipement.id);
+
+    if (!lastPassage) {
+      showToast("Aucun passage précédent. Utilisez Observation.", "error");
+      return;
+    }
+
+    setQuickSaving(true);
     const now = new Date().toISOString();
-    setEquipements((prev) => prev.map((e) => (e.id === id ? { ...e, date_fin_intervention: now } : e)));
-    await supabase.from("equipements").update({ date_fin_intervention: now }).eq("id", id);
-    setSavingIntervention(false);
-    const eq = equipements.find((e) => e.id === id);
-    showToast(`Intervention ${eq?.code_faratec || ""} terminee`, "success");
-  };
+    const nouveauStatut = newPct >= 100 ? "termine" : "en_reparation";
+    const isFirstPassage = !quickUpdateEquipement.date_debut_intervention;
 
-  const handleMarquerLivre = async (id: string) => {
-    const eq = equipements.find((e) => e.id === id);
-    if (!eq || eq.pourcentage_global < 100) return;
+    const optimisticPassage: Passage = {
+      id: `temp-quick-${Date.now()}`,
+      equipement_id: quickUpdateEquipement.id,
+      atelier_id: lastPassage.atelier_id,
+      operateur_id: lastPassage.operateur_id,
+      type_travail_id: lastPassage.type_travail_id,
+      pourcentage: newPct,
+      commentaire: null,
+      photo_url: null,
+      passage_date: now,
+      tournee_id: tourneeActive?.id || null,
+      ateliers: lastPassage.ateliers,
+      operateurs: lastPassage.operateurs,
+      types_travaux: lastPassage.types_travaux,
+    };
+
+    setPassages((prev) => [optimisticPassage, ...prev]);
     setEquipements((prev) =>
       prev.map((e) =>
-        e.id === id ? { ...e, statut: "livre", date_livraison_reelle: new Date().toISOString().slice(0, 10) } : e
+        e.id === quickUpdateEquipement.id
+          ? {
+              ...e,
+              pourcentage_global: newPct,
+              statut: nouveauStatut,
+              date_debut_intervention: isFirstPassage ? now : e.date_debut_intervention,
+              date_fin_intervention: newPct >= 100 && !e.date_fin_intervention ? now : e.date_fin_intervention,
+            }
+          : e
       )
     );
-    await supabase.from("equipements").update({
-      statut: "livre",
-      date_livraison_reelle: new Date().toISOString().slice(0, 10),
-    }).eq("id", id);
-    showToast(`Equipement ${eq.code_faratec || "sans code"} marque comme livre`, "success");
+
+    await supabase.from("journal_passages").insert({
+      owner_id: user.id,
+      equipement_id: quickUpdateEquipement.id,
+      atelier_id: lastPassage.atelier_id,
+      operateur_id: lastPassage.operateur_id,
+      type_travail_id: lastPassage.type_travail_id,
+      pourcentage: newPct,
+      commentaire: null,
+      photo_url: null,
+      tournee_id: tourneeActive?.id || null,
+    });
+
+    const updateData: Record<string, any> = { pourcentage_global: newPct, statut: nouveauStatut };
+    if (isFirstPassage) updateData.date_debut_intervention = now;
+    if (newPct >= 100 && !quickUpdateEquipement.date_fin_intervention) {
+      updateData.date_fin_intervention = now;
+    }
+    await supabase.from("equipements").update(updateData).eq("id", quickUpdateEquipement.id);
+
+    setQuickSaving(false);
+    closeQuickUpdate();
+    showToast(`MAJ rapide — ${quickUpdateEquipement.code_faratec || "Sans code"} à ${newPct}%`, "success");
   };
 
-  // --- ÉDITION ---
+  // --- LIVRAISON (avec modale de confirmation) ---
+  const openLivraison = (eq: Equipement) => {
+    if (eq.statut === "livre") return;
+    if (eq.pourcentage_global < 100) return;
+    setLivraisonEquipement(eq);
+    setRapportEtabli(eq.rapport_etabli || false);
+  };
+
+  const closeLivraison = () => {
+    setLivraisonEquipement(null);
+    setRapportEtabli(false);
+  };
+
+  const handleConfirmLivraison = async () => {
+    if (!livraisonEquipement) return;
+    setLivraisonSaving(true);
+    const dateIso = new Date().toISOString().slice(0, 10);
+
+    setEquipements((prev) =>
+      prev.map((e) =>
+        e.id === livraisonEquipement.id
+          ? { ...e, statut: "livre", date_livraison_reelle: dateIso, rapport_etabli: rapportEtabli }
+          : e
+      )
+    );
+
+    await supabase.from("equipements").update({
+      statut: "livre",
+      date_livraison_reelle: dateIso,
+      rapport_etabli: rapportEtabli,
+    }).eq("id", livraisonEquipement.id);
+
+    setLivraisonSaving(false);
+    closeLivraison();
+    showToast(`Équipement ${livraisonEquipement.code_faratec || "sans code"} marqué comme livré`, "success");
+  };
+
+  // --- EDITION ---
   const openEdit = (eq: Equipement) => {
     setEditingEquipement(eq);
     setEditForm({
@@ -736,6 +866,7 @@ export default function JournalPage() {
       operateur: eq.operateur || "",
       urgence: eq.urgence || "normal",
       nature_travaux: eq.nature_travaux || "",
+      date_fin_prevue: eq.date_fin_prevue ? eq.date_fin_prevue.slice(0, 10) : "",
     });
     setEditErrors({});
   };
@@ -770,6 +901,7 @@ export default function JournalPage() {
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
       nature_travaux: editForm.nature_travaux || null,
+      date_fin_prevue: editForm.date_fin_prevue ? new Date(editForm.date_fin_prevue).toISOString() : null,
     };
 
     setEquipements((prev) => prev.map((e) => (e.id === editingEquipement.id ? updated : e)));
@@ -787,13 +919,12 @@ export default function JournalPage() {
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
       nature_travaux: editForm.nature_travaux || null,
+      date_fin_prevue: editForm.date_fin_prevue ? new Date(editForm.date_fin_prevue).toISOString() : null,
     }).eq("id", editingEquipement.id);
 
     setEditSaving(false);
-
     closeEdit();
-
-    showToast(`Equipement ${updated.code_faratec || "sans code"} modifie`, "success");
+    showToast(`Équipement ${updated.code_faratec || "sans code"} modifié`, "success");
   };
 
   const getHistorique = (equipementId: string) => passages.filter((p) => p.equipement_id === equipementId);
@@ -836,11 +967,10 @@ export default function JournalPage() {
           </div>
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
-            <input
+            <ClientSelect
               value={form.client_name}
-              onChange={(e) => setForm((f) => ({ ...f, client_name: e.target.value }))}
-              placeholder="Nom du client"
-              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errs.client_name ? "border-red-400" : "border-slate-200"}`}
+              onChange={(val) => setForm((f) => ({ ...f, client_name: val }))}
+              error={!!errs.client_name}
             />
             {errs.client_name && <p className="text-xs text-red-600 mt-1">{errs.client_name}</p>}
           </div>
@@ -938,8 +1068,20 @@ export default function JournalPage() {
       </div>
 
       <div>
-        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Détails</h4>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Délais & Détails</h4>
         <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">
+              Date prévue de fin <span className="text-slate-400 font-normal">(recommandée par le client)</span>
+            </label>
+            <input
+              type="date"
+              value={form.date_fin_prevue}
+              onChange={(e) => setForm((f) => ({ ...f, date_fin_prevue: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+            <p className="text-[10px] text-slate-400 mt-1">Optionnel — permet de calculer les retards</p>
+          </div>
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
             <input
@@ -948,6 +1090,8 @@ export default function JournalPage() {
               className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
             />
           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Nature des travaux</label>
             <SearchableSelect
@@ -968,7 +1112,7 @@ export default function JournalPage() {
 
   return (
     <div className="space-y-5">
-      {/* --- EN-TÊTE --- */}
+      {/* --- EN-TETE --- */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <h1 className="text-xl font-bold text-slate-800">Journal / Tournée</h1>
@@ -1019,11 +1163,11 @@ export default function JournalPage() {
           </p>
           <p className="text-xl font-bold text-slate-800">{statsStatuts.enCours}</p>
         </div>
-        <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-green-500">
+        <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-violet-500">
           <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
-            <Flag size={10} /> Terminés
+            <Flag size={10} /> Prêts à livrer
           </p>
-          <p className="text-xl font-bold text-slate-800">{statsStatuts.termine}</p>
+          <p className="text-xl font-bold text-slate-800">{statsStatuts.pretALivrer}</p>
         </div>
         <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-slate-600">
           <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
@@ -1057,7 +1201,7 @@ export default function JournalPage() {
         </div>
       )}
 
-      {/* --- BLOC UNIFIÉ --- */}
+      {/* --- BLOC UNIFIE --- */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-100 space-y-3">
           <div className="relative">
@@ -1080,8 +1224,8 @@ export default function JournalPage() {
             <button onClick={() => setFilterMode("en_cours")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "en_cours" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
               <PlayCircle size={12} /> En cours ({statsStatuts.enCours})
             </button>
-            <button onClick={() => setFilterMode("termine")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "termine" ? "bg-green-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
-              <Flag size={12} /> Terminés ({statsStatuts.termine})
+            <button onClick={() => setFilterMode("pret_a_livrer")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "pret_a_livrer" ? "bg-violet-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <Flag size={12} /> Prêts à livrer ({statsStatuts.pretALivrer})
             </button>
             <button onClick={() => setFilterMode("not_seen_today")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "not_seen_today" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
               <Clock size={12} /> Non vus aujourd'hui
@@ -1116,8 +1260,8 @@ export default function JournalPage() {
               const dernierPassage = dernierPassageMap.get(e.id);
               const history3 = historique.slice(0, 3);
               const isStagnant = history3.length >= 3 && history3.every((p) => p.pourcentage === history3[0].pourcentage);
-              const isNew = historique.length === 0;
-              const canLivrer = e.pourcentage_global >= 100;
+              const isLivre = e.statut === "livre";
+              const canLivrer = !isLivre && e.pourcentage_global >= 100;
               const isUrgent = e.urgence === "urgent";
               const statutInfo = getStatutInfo(e.statut, e.pourcentage_global);
               const StatutIcon = statutInfo.icon;
@@ -1127,7 +1271,6 @@ export default function JournalPage() {
               const dureeIntervention = e.date_debut_intervention ? getDaysBetween(e.date_debut_intervention, e.date_fin_intervention) : null;
               const dureeTotale = getDaysBetween(e.created_at, e.date_fin_intervention);
 
-              const canTerminerIntervention = e.pourcentage_global >= 100 && !e.date_fin_intervention;
               const sessionsActives = sessionsActivesParEquipement.get(e.id) || [];
               const tempsParOperateur = getTempsParOperateur(e.id);
 
@@ -1207,9 +1350,6 @@ export default function JournalPage() {
                           ))}
                         </div>
                       )}
-                      {isNew && (
-                        <p className="text-[10px] text-slate-400 mt-0.5 italic">Aucun passage enregistré — cliquez sur Observation pour démarrer</p>
-                      )}
                     </div>
 
                     <div className="flex items-center gap-3 sm:w-44">
@@ -1225,6 +1365,19 @@ export default function JournalPage() {
                     </div>
 
                     <div className="flex items-center gap-1.5">
+                      {/* MAJ RAPIDE */}
+                      <button
+                        onClick={() => openQuickUpdate(e)}
+                        disabled={isLivre}
+                        className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap transition ${
+                          isLivre
+                            ? "text-slate-300 cursor-not-allowed"
+                            : "bg-emerald-500 hover:bg-emerald-600 text-white shadow-sm"
+                        }`}
+                        title={isLivre ? "Équipement déjà livré" : "Mise à jour rapide du %"}
+                      >
+                        <ZapIcon size={12} /> MAJ rapide
+                      </button>
                       <button
                         onClick={() => openObservation(e)}
                         className="flex items-center gap-1 bg-amber-500 hover:bg-amber-600 text-neutral-900 rounded-lg px-3 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition"
@@ -1238,13 +1391,13 @@ export default function JournalPage() {
                       >
                         <Calculator size={12} />
                       </button>
-                      {canTerminerIntervention && (
+                      {canLivrer && (
                         <button
-                          onClick={() => handleTerminerIntervention(e.id)}
-                          disabled={savingIntervention}
-                          className="flex items-center gap-1 bg-orange-600 hover:bg-orange-700 text-white rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition disabled:opacity-50"
+                          onClick={() => openLivraison(e)}
+                          className="flex items-center gap-1 bg-violet-600 hover:bg-violet-700 text-white rounded-lg px-2 py-1.5 text-xs font-semibold whitespace-nowrap shadow-sm transition"
+                          title="Marquer comme livré"
                         >
-                          <StopCircle size={12} /> Terminer
+                          <Truck size={12} />
                         </button>
                       )}
                       <button
@@ -1253,16 +1406,6 @@ export default function JournalPage() {
                         title="Modifier"
                       >
                         <Edit3 size={12} />
-                      </button>
-                      <button
-                        onClick={() => canLivrer && handleMarquerLivre(e.id)}
-                        disabled={!canLivrer}
-                        className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition ${
-                          canLivrer ? "text-violet-700 hover:bg-violet-50" : "text-slate-300 cursor-not-allowed"
-                        }`}
-                        title={canLivrer ? "Marquer comme livré" : `Impossible : ${e.pourcentage_global}%`}
-                      >
-                        <Truck size={12} />
                       </button>
                       <button
                         onClick={() => setExpandedId(isExpanded ? null : e.id)}
@@ -1305,6 +1448,15 @@ export default function JournalPage() {
                         </div>
                       </div>
 
+                      {e.date_fin_prevue && (
+                        <div className="bg-white rounded-lg border border-slate-200 p-3">
+                          <p className="text-[9px] uppercase tracking-wider text-slate-500 font-bold mb-1">
+                            Date prévue de fin
+                          </p>
+                          <p className="text-sm font-bold text-slate-800">{formatDate(e.date_fin_prevue)}</p>
+                        </div>
+                      )}
+
                       {tempsParOperateur.length > 0 && (
                         <div>
                           <p className="text-xs font-semibold text-slate-600 mb-3 flex items-center gap-1">
@@ -1333,20 +1485,6 @@ export default function JournalPage() {
                                         {tp.sessions.length} session{tp.sessions.length > 1 ? "s" : ""}
                                       </p>
                                     </div>
-                                  </div>
-                                  <div className="mt-2 space-y-1 border-t border-slate-100 pt-2">
-                                    {tp.sessions.map((s) => (
-                                      <div key={s.id} className="flex items-center justify-between text-[10px]">
-                                        <span className="text-slate-500">
-                                          {formatDate(s.started_at)} {formatTime(s.started_at)}
-                                          {s.ended_at && ` → ${formatTime(s.ended_at)}`}
-                                          {!s.ended_at && " → en cours"}
-                                        </span>
-                                        <span className="font-mono text-slate-600">
-                                          {formatDureeMinutes(calculerTempsTravail(s.started_at, s.ended_at))}
-                                        </span>
-                                      </div>
-                                    ))}
                                   </div>
                                 </div>
                               );
@@ -1431,7 +1569,7 @@ export default function JournalPage() {
         )}
       </div>
 
-      {/* --- SECTION LIVRÉS --- */}
+      {/* --- SECTION LIVRES --- */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
         <button
           onClick={() => setShowLivre(!showLivre)}
@@ -1477,7 +1615,7 @@ export default function JournalPage() {
         )}
       </div>
 
-      {/* --- MODALE DE CRÉATION --- */}
+      {/* --- MODALE CREATION --- */}
       {creatingEquipement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeCreate} />
@@ -1485,8 +1623,7 @@ export default function JournalPage() {
             <div className="p-5 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
               <div>
                 <h3 className="font-bold text-slate-800 flex items-center gap-2">
-                  <Sparkles size={16} className="text-amber-600" />
-                  Nouvel équipement
+                  <Sparkles size={16} className="text-amber-600" /> Nouvel équipement
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">Cas exceptionnel : équipement non enregistré à la réception.</p>
               </div>
@@ -1515,7 +1652,7 @@ export default function JournalPage() {
         </div>
       )}
 
-      {/* --- MODALE D'OBSERVATION --- */}
+      {/* --- MODALE OBSERVATION (complete) --- */}
       {selectedEquipement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeObservation} />
@@ -1612,20 +1749,32 @@ export default function JournalPage() {
               </div>
 
               <div>
-                <label className="text-xs font-medium text-slate-600 block mb-1">Pourcentage d'avancement *</label>
-                <input
-                  type="number" min={0} max={100}
-                  value={pourcentage}
-                  onChange={(e) => { setPourcentage(e.target.value); setErrors((p) => ({ ...p, pourcentage: "" })); }}
-                  className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.pourcentage ? "border-red-400" : "border-slate-200"}`}
+                <label className="text-xs font-medium text-slate-600 block mb-2">
+                  Pourcentage d'avancement *
+                </label>
+                <PercentageSlider
+                  value={Number(pourcentage) || 0}
+                  onChange={(val) => {
+                    setPourcentage(String(val));
+                    setErrors((p) => ({ ...p, pourcentage: "" }));
+                  }}
                 />
-                {errors.pourcentage && <p className="text-xs text-red-600 mt-1">{errors.pourcentage}</p>}
-                <div className="mt-2 w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-300 ${getProgressColor(Number(pourcentage) || 0)}`}
-                    style={{ width: `${Number(pourcentage) || 0}%` }}
+                <div className="flex items-center gap-2 mt-3">
+                  <input
+                    type="number" min={0} max={100}
+                    value={pourcentage}
+                    onChange={(e) => { setPourcentage(e.target.value); setErrors((p) => ({ ...p, pourcentage: "" })); }}
+                    className={`w-24 border rounded-lg px-3 py-2 text-sm text-center font-bold focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.pourcentage ? "border-red-400" : "border-slate-200"}`}
                   />
+                  <span className="text-sm font-bold text-slate-600">%</span>
+                  <div className="flex-1 bg-slate-100 rounded-full h-1.5 overflow-hidden ml-2">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${getProgressColor(Number(pourcentage) || 0)}`}
+                      style={{ width: `${Number(pourcentage) || 0}%` }}
+                    />
+                  </div>
                 </div>
+                {errors.pourcentage && <p className="text-xs text-red-600 mt-1">{errors.pourcentage}</p>}
               </div>
 
               <div>
@@ -1677,7 +1826,153 @@ export default function JournalPage() {
         </div>
       )}
 
-      {/* --- MODALE D'ÉDITION --- */}
+      {/* --- MODALE MAJ RAPIDE --- */}
+      {quickUpdateEquipement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeQuickUpdate} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                  <ZapIcon size={16} className="text-emerald-600" />
+                  Mise à jour rapide
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {quickUpdateEquipement.code_faratec || "Sans code"} — {quickUpdateEquipement.client_name}
+                </p>
+              </div>
+              <button onClick={closeQuickUpdate} className="text-slate-400 hover:text-slate-600 p-1 transition">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {dernierPassageMap.get(quickUpdateEquipement.id) ? (
+                <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                  <p className="text-[10px] uppercase tracking-wider text-emerald-700 font-bold mb-1">
+                    Infos conservées du dernier passage
+                  </p>
+                  <p className="text-xs text-emerald-900">
+                    {dernierPassageMap.get(quickUpdateEquipement.id)?.ateliers?.name || "—"}
+                    {dernierPassageMap.get(quickUpdateEquipement.id)?.operateurs?.full_name && ` · ${dernierPassageMap.get(quickUpdateEquipement.id)?.operateurs?.full_name}`}
+                    {dernierPassageMap.get(quickUpdateEquipement.id)?.types_travaux?.name && ` · ${dernierPassageMap.get(quickUpdateEquipement.id)?.types_travaux?.name}`}
+                  </p>
+                </div>
+              ) : (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                  <p className="text-xs text-amber-800">
+                    ⚠️ Aucun passage précédent. Utilisez "Observation" pour le premier passage.
+                  </p>
+                </div>
+              )}
+
+              <div>
+                <label className="text-xs font-medium text-slate-600 block mb-2">
+                  Nouveau pourcentage
+                </label>
+                <PercentageSlider
+                  value={quickPourcentage}
+                  onChange={setQuickPourcentage}
+                />
+                <div className="flex items-center gap-2 mt-3">
+                  <input
+                    type="number" min={0} max={100}
+                    value={quickPourcentage}
+                    onChange={(e) => setQuickPourcentage(Number(e.target.value))}
+                    className="w-24 border border-slate-200 rounded-lg px-3 py-2 text-sm text-center font-bold focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  />
+                  <span className="text-sm font-bold text-slate-600">%</span>
+                  <div className="flex-1 bg-slate-100 rounded-full h-1.5 overflow-hidden ml-2">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${getProgressColor(quickPourcentage)}`}
+                      style={{ width: `${quickPourcentage}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-[10px] text-slate-500 bg-slate-50 rounded-lg p-2.5">
+                💡 Cette mise à jour créera un nouveau passage dans l'historique avec les infos du dernier passage.
+              </p>
+            </div>
+
+            <div className="p-5 border-t border-slate-100 flex justify-end gap-2">
+              <button onClick={closeQuickUpdate} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">
+                Annuler
+              </button>
+              <button
+                onClick={handleQuickUpdate}
+                disabled={quickSaving || !dernierPassageMap.get(quickUpdateEquipement.id)}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg px-5 py-2 text-sm font-semibold disabled:opacity-50 flex items-center gap-2 shadow-sm transition"
+              >
+                {quickSaving ? <><Loader2 className="animate-spin" size={14} /> Mise à jour...</> : <><ZapIcon size={14} /> Valider</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODALE LIVRAISON --- */}
+      {livraisonEquipement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeLivraison} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                  <Truck size={16} className="text-violet-600" /> Confirmer la livraison
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">Vérifiez les informations avant de valider.</p>
+              </div>
+              <button onClick={closeLivraison} className="text-slate-400 hover:text-slate-600 p-1 transition">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="bg-violet-50 border border-violet-200 rounded-lg p-3">
+                <p className="text-sm font-bold text-slate-800">{livraisonEquipement.code_faratec || "Sans code"}</p>
+                <p className="text-xs text-slate-600 mt-0.5">{livraisonEquipement.client_name} · {livraisonEquipement.type_equipement}</p>
+                <p className="text-xs text-violet-700 mt-1 font-semibold">Avancement : {livraisonEquipement.pourcentage_global}%</p>
+              </div>
+
+              <label className="flex items-start gap-3 cursor-pointer bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg p-3 transition">
+                <input
+                  type="checkbox"
+                  checked={rapportEtabli}
+                  onChange={(e) => setRapportEtabli(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-blue-600 cursor-pointer"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-slate-800 flex items-center gap-1.5">
+                    📄 Rapport établi
+                  </p>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Cocher si le rapport de l'équipement a été rédigé et archivé.</p>
+                </div>
+              </label>
+
+              <p className="text-xs text-slate-500 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                ⚠️ Cette action marquera l'équipement comme <strong>livré</strong> avec la date d'aujourd'hui.
+              </p>
+            </div>
+
+            <div className="p-5 border-t border-slate-100 flex justify-end gap-2">
+              <button onClick={closeLivraison} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">
+                Annuler
+              </button>
+              <button
+                onClick={handleConfirmLivraison}
+                disabled={livraisonSaving}
+                className="bg-violet-600 hover:bg-violet-700 text-white rounded-lg px-5 py-2 text-sm font-semibold disabled:opacity-50 flex items-center gap-2 shadow-sm transition"
+              >
+                {livraisonSaving ? <><Loader2 className="animate-spin" size={14} /> Validation...</> : <><Truck size={14} /> Confirmer la livraison</>}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODALE EDITION --- */}
       {editingEquipement && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeEdit} />

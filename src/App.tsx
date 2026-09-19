@@ -8,7 +8,7 @@ import EquipementsPage from "./pages/EquipementsPage";
 import JournalPage from "./pages/JournalPage";
 import AteliersPage from "./pages/AteliersPage";
 import OperateursPage from "./pages/OperateursPage";
-import TempsOperateursPage from "./pages/TempsOperateursPage";
+import ActiviteOperateursPage from "./pages/ActiviteOperateursPage";
 import CoutsPage from "./pages/CoutsPage";
 import VueClientPage from "./pages/VueClientPage";
 import OptimisationPage from "./pages/OptimisationPage";
@@ -54,7 +54,7 @@ export default function App() {
         <Route path="/journal" element={<JournalPage />} />
         <Route path="/ateliers" element={<AteliersPage />} />
         <Route path="/operateurs" element={<OperateursPage />} />
-        <Route path="/temps-operateurs" element={<TempsOperateursPage />} />
+        <Route path="/activite-operateurs" element={<ActiviteOperateursPage />} />
         <Route path="/couts" element={<CoutsPage />} />
         <Route path="/vue-client" element={<VueClientPage />} />
         <Route path="/optimisation" element={<OptimisationPage />} />

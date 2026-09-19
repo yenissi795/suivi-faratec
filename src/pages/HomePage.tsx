@@ -16,7 +16,7 @@ const modules = [
   { to: "/equipements", label: "Équipements", image: tileEquipements },
   { to: "/ateliers", label: "Ateliers", image: tileAteliers },
   { to: "/operateurs", label: "Opérateurs", image: tileTechniciens },
-  { to: "/temps-operateurs", label: "Temps opérateurs", image: tileTempsOperateurs },
+  { to: "/activite-operateurs", label: "Activité opérateurs", image: tileTempsOperateurs },
   { to: "/couts", label: "Coûts", image: tileCouts },
   { to: "/optimisation", label: "Optimisation", image: tileOptimisation },
   { to: "/vue-client", label: "Répertoire équipements", image: tileVueClient },

@@ -14,7 +14,7 @@ const links = [
   { to: "/journal", label: "Journal / Tournée", icon: ClipboardList },
   { to: "/ateliers", label: "Ateliers", icon: Factory },
   { to: "/operateurs", label: "Opérateurs", icon: Users },
-  { to: "/temps-operateurs", label: "Temps opérateurs", icon: Timer },
+  { to: "/activite-operateurs", label: "Activité opérateurs", icon: Timer },
   { to: "/couts", label: "Coûts", icon: Calculator },  
   { to: "/vue-client", label: "Répertoire équipements", icon: Eye },
   { to: "/optimisation", label: "Optimisation", icon: TrendingUp },                  // ← AJOUT

@@ -4,7 +4,8 @@ import {
   Users, Search, FileDown, Loader2, Calendar, CalendarDays,
   CalendarRange, Target, Package, CheckCircle2, PlayCircle,
   Hourglass, Flag, Zap, TrendingUp, Filter, X, ChevronDown,
-  ChevronUp, Sheet, RotateCcw, Building2
+  ChevronUp, Sheet, RotateCcw, Building2, AlertTriangle,
+  Info, Clock, CalendarClock
 } from "lucide-react";
 import { buildCsv } from "../lib/reportPdf";
 
@@ -27,13 +28,23 @@ interface Equipement {
   date_livraison_reelle: string | null;
   date_debut_intervention: string | null;
   date_fin_intervention: string | null;
+  date_fin_prevue: string | null;
+  rapport_etabli: boolean | null;
 }
 
-type PeriodType = "semaine" | "mois" | "annee" | "custom" | "tout";
-type StatutFiltre = "tous" | "en_attente" | "en_cours" | "termine" | "livre";
+interface Passage {
+  equipement_id: string;
+  pourcentage: number;
+  passage_date: string;
+}
+
+type PeriodType = "jour" | "semaine" | "mois" | "annee" | "custom" | "tout";
+type StatutFiltre = "tous" | "en_attente" | "en_cours" | "pret_a_livrer" | "livre" | "stagnant";
+type DateFilterType = "created" | "livraison";
 
 export default function VueClientPage() {
   const [equipements, setEquipements] = useState<Equipement[]>([]);
+  const [passages, setPassages] = useState<Passage[]>([]);
   const [loading, setLoading] = useState(true);
 
   // Mode "client spécifique" vs "tous les clients"
@@ -52,9 +63,14 @@ export default function VueClientPage() {
   const [filterMle, setFilterMle] = useState("");
   const [filterTension, setFilterTension] = useState("");
   const [filterVitesse, setFilterVitesse] = useState("");
-  const [filterStatut, setFilterStatut] = useState<StatutFiltre>("tous");
   const [filterUrgence, setFilterUrgence] = useState<"tous" | "urgent" | "normal">("tous");
   const [filterDateExacte, setFilterDateExacte] = useState("");
+
+  // Statut (boutons rapides)
+  const [filterStatut, setFilterStatut] = useState<StatutFiltre>("tous");
+
+  // Type de date (entree ou livraison)
+  const [dateFilterType, setDateFilterType] = useState<DateFilterType>("created");
 
   // Période
   const [period, setPeriod] = useState<PeriodType>("tout");
@@ -63,15 +79,26 @@ export default function VueClientPage() {
   });
   const [customEnd, setCustomEnd] = useState(() => new Date().toISOString().slice(0, 10));
 
+  // Modale détail
+  const [selectedEquipement, setSelectedEquipement] = useState<Equipement | null>(null);
+
   // --- CHARGEMENT ---
   const load = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from("equipements")
-      .select("id, code_faratec, client_name, type_equipement, nature_travaux, marque, puissance_kw, ndi_da_ns, mle_reference, tension, vitesse, urgence, statut, pourcentage_global, created_at, date_livraison_reelle, date_debut_intervention, date_fin_intervention")
-      .is("deleted_at", null)
-      .order("created_at", { ascending: false });
-    setEquipements((data as Equipement[]) || []);
+    const [eqRes, passRes] = await Promise.all([
+      supabase
+        .from("equipements")
+        .select("id, code_faratec, client_name, type_equipement, nature_travaux, marque, puissance_kw, ndi_da_ns, mle_reference, tension, vitesse, urgence, statut, pourcentage_global, created_at, date_livraison_reelle, date_debut_intervention, date_fin_intervention, date_fin_prevue, rapport_etabli")
+        .is("deleted_at", null)
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("journal_passages")
+        .select("equipement_id, pourcentage, passage_date")
+        .is("deleted_at", null)
+        .order("passage_date", { ascending: false }),
+    ]);
+    setEquipements((eqRes.data as Equipement[]) || []);
+    setPassages((passRes.data as Passage[]) || []);
     setLoading(false);
   };
 
@@ -90,7 +117,7 @@ export default function VueClientPage() {
     return clients.filter((c) => c.toLowerCase().includes(s)).slice(0, 50);
   }, [clients, searchClient]);
 
-  // --- LISTES UNIQUES (types, natures, marques) ---
+  // --- LISTES UNIQUES ---
   const typesUniques = useMemo(() => {
     const set = new Set<string>();
     equipements.forEach((e) => { if (e.type_equipement) set.add(e.type_equipement); });
@@ -109,10 +136,29 @@ export default function VueClientPage() {
     return Array.from(set).sort((a, b) => a.localeCompare(b));
   }, [equipements]);
 
+  // --- STAGNANTS ---
+  const stagnantIds = useMemo(() => {
+    const set = new Set<string>();
+    const enCours = equipements.filter((e) => e.statut !== "livre");
+    enCours.forEach((e) => {
+      const hist = passages.filter((p) => p.equipement_id === e.id).slice(0, 3);
+      if (hist.length >= 3 && hist.every((p) => p.pourcentage === hist[0].pourcentage)) {
+        set.add(e.id);
+      }
+    });
+    return set;
+  }, [equipements, passages]);
+
   // --- BORNES DE LA PÉRIODE ---
   const periodBounds = useMemo(() => {
     const now = new Date();
     if (period === "tout") return { start: new Date("1970-01-01"), end: new Date("2100-01-01"), label: "Tout l'historique" };
+
+    if (period === "jour") {
+      const start = new Date(now); start.setHours(0, 0, 0, 0);
+      const end = new Date(now); end.setHours(23, 59, 59, 999);
+      return { start, end, label: `Aujourd'hui (${now.toLocaleDateString("fr-FR")})` };
+    }
 
     if (period === "semaine") {
       const dayOfWeek = now.getDay() === 0 ? 7 : now.getDay();
@@ -134,7 +180,7 @@ export default function VueClientPage() {
     if (period === "annee") {
       const start = new Date(now.getFullYear(), 0, 1);
       const end = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
-      return { start, end, label: `Annee ${now.getFullYear()}` };
+      return { start, end, label: `Année ${now.getFullYear()}` };
     }
 
     const s = new Date(customStart); s.setHours(0, 0, 0, 0);
@@ -148,17 +194,21 @@ export default function VueClientPage() {
       // 1. Filtre client
       if (selectedClient && e.client_name !== selectedClient) return false;
 
-      // 2. Filtre date exacte (prioritaire sur la période)
+      // 2. Filtre date exacte (prioritaire)
       if (filterDateExacte) {
-        const eqDate = new Date(e.created_at).toISOString().slice(0, 10);
+        const dateRef = dateFilterType === "created" ? e.created_at : e.date_livraison_reelle;
+        if (!dateRef) return false;
+        const eqDate = new Date(dateRef).toISOString().slice(0, 10);
         if (eqDate !== filterDateExacte) return false;
       } else {
-        // Sinon filtre période normale
-        const d = new Date(e.created_at);
+        // Sinon filtre période
+        const dateRef = dateFilterType === "created" ? e.created_at : e.date_livraison_reelle;
+        if (!dateRef) return false;
+        const d = new Date(dateRef);
         if (d < periodBounds.start || d > periodBounds.end) return false;
       }
 
-      // 3. Recherche texte enrichie
+      // 3. Recherche texte
       if (searchTerm) {
         const s = searchTerm.toLowerCase().trim();
         const matches =
@@ -174,51 +224,38 @@ export default function VueClientPage() {
         if (!matches) return false;
       }
 
-      // 4. Filtre type
+      // 4-11. Filtres avancés
       if (filterType && e.type_equipement !== filterType) return false;
-
-      // 5. Filtre nature des travaux
       if (filterNature && e.nature_travaux !== filterNature) return false;
-
-      // 6. Filtre marque
       if (filterMarque && e.marque !== filterMarque) return false;
-
-      // 7. Filtre puissance (valeur exacte)
       if (filterPuissance) {
         const p = Number(filterPuissance);
         if (isNaN(p) || e.puissance_kw !== p) return false;
       }
-
-      // 8. Filtre NDI/DA/NS (contains)
       if (filterNdi) {
         const s = filterNdi.toLowerCase().trim();
         if (!e.ndi_da_ns || !e.ndi_da_ns.toLowerCase().includes(s)) return false;
       }
-
-      // 9. Filtre MLE/Référence (contains)
       if (filterMle) {
         const s = filterMle.toLowerCase().trim();
         if (!e.mle_reference || !e.mle_reference.toLowerCase().includes(s)) return false;
       }
-
-      // 10. Filtre Tension (contains)
       if (filterTension) {
         const s = filterTension.toLowerCase().trim();
         if (!e.tension || !e.tension.toLowerCase().includes(s)) return false;
       }
-
-      // 11. Filtre Vitesse (contains)
       if (filterVitesse) {
         const s = filterVitesse.toLowerCase().trim();
         if (!e.vitesse || !e.vitesse.toLowerCase().includes(s)) return false;
       }
 
-      // 12. Filtre statut
+      // 12. Filtre statut (boutons rapides)
       if (filterStatut !== "tous") {
         if (filterStatut === "livre" && e.statut !== "livre") return false;
         if (filterStatut === "en_attente" && (e.statut === "livre" || e.pourcentage_global > 0)) return false;
         if (filterStatut === "en_cours" && (e.statut === "livre" || e.pourcentage_global === 0 || e.pourcentage_global >= 100)) return false;
-        if (filterStatut === "termine" && (e.statut === "livre" || e.pourcentage_global < 100)) return false;
+        if (filterStatut === "pret_a_livrer" && (e.statut === "livre" || e.pourcentage_global < 100)) return false;
+        if (filterStatut === "stagnant" && !stagnantIds.has(e.id)) return false;
       }
 
       // 13. Filtre urgence
@@ -229,9 +266,9 @@ export default function VueClientPage() {
 
       return true;
     });
-  }, [equipements, selectedClient, periodBounds, filterDateExacte, searchTerm, filterType, filterNature, filterMarque, filterPuissance, filterNdi, filterMle, filterTension, filterVitesse, filterStatut, filterUrgence]);
+  }, [equipements, selectedClient, periodBounds, filterDateExacte, dateFilterType, searchTerm, filterType, filterNature, filterMarque, filterPuissance, filterNdi, filterMle, filterTension, filterVitesse, filterStatut, filterUrgence, stagnantIds]);
 
-  // --- COMPTER LES FILTRES ACTIFS ---
+  // --- COMPTER FILTRES ACTIFS (hors statut) ---
   const nbFiltresActifs = useMemo(() => {
     let n = 0;
     if (searchTerm) n++;
@@ -243,13 +280,12 @@ export default function VueClientPage() {
     if (filterMle) n++;
     if (filterTension) n++;
     if (filterVitesse) n++;
-    if (filterStatut !== "tous") n++;
     if (filterUrgence !== "tous") n++;
     if (filterDateExacte) n++;
     return n;
-  }, [searchTerm, filterType, filterNature, filterMarque, filterPuissance, filterNdi, filterMle, filterTension, filterVitesse, filterStatut, filterUrgence, filterDateExacte]);
+  }, [searchTerm, filterType, filterNature, filterMarque, filterPuissance, filterNdi, filterMle, filterTension, filterVitesse, filterUrgence, filterDateExacte]);
 
-  // --- RÉINITIALISER LES FILTRES ---
+  // --- RÉINITIALISER ---
   const resetFiltres = () => {
     setSearchTerm("");
     setFilterType("");
@@ -260,22 +296,12 @@ export default function VueClientPage() {
     setFilterMle("");
     setFilterTension("");
     setFilterVitesse("");
-    setFilterStatut("tous");
     setFilterUrgence("tous");
     setFilterDateExacte("");
+    setFilterStatut("tous");
     setPeriod("tout");
   };
 
-  // --- STATS ---
-  const stats = useMemo(() => {
-    const total = filteredEquipements.length;
-    const enAttente = filteredEquipements.filter((e) => e.pourcentage_global === 0 && e.statut !== "livre").length;
-    const enCours = filteredEquipements.filter((e) => e.pourcentage_global > 0 && e.pourcentage_global < 100 && e.statut !== "livre").length;
-    const termine = filteredEquipements.filter((e) => e.pourcentage_global >= 100 && e.statut !== "livre").length;
-    const livres = filteredEquipements.filter((e) => e.statut === "livre").length;
-    const urgents = filteredEquipements.filter((e) => e.urgence === "urgent" && e.statut !== "livre").length;
-    return { total, enAttente, enCours, termine, livres, urgents };
-  }, [filteredEquipements]);
 
   // --- TÉLÉCHARGEMENT PDF ---
   const handleDownloadPdf = async () => {
@@ -318,7 +344,7 @@ export default function VueClientPage() {
     const rows = filteredEquipements.map((e) => {
       let statutLabel = "En attente";
       if (e.statut === "livre") statutLabel = "Livre";
-      else if (e.pourcentage_global >= 100) statutLabel = "Termine";
+      else if (e.pourcentage_global >= 100) statutLabel = "Pret a livrer";
       else if (e.pourcentage_global > 0) statutLabel = "En cours";
 
       return [
@@ -345,21 +371,61 @@ export default function VueClientPage() {
     buildCsv([header, ...rows], filename);
   };
 
+  // --- HELPERS ---
   const formatDate = (iso: string | null) => iso ? new Date(iso).toLocaleDateString("fr-FR") : "—";
+
+  const getDaysBetween = (from: string, to: string | null): number => {
+    const endDate = to ? new Date(to) : new Date();
+    const startDate = new Date(from);
+    return Math.max(0, Math.floor((endDate.getTime() - startDate.getTime()) / 86400000));
+  };
 
   const getStatutInfo = (e: Equipement) => {
     if (e.statut === "livre") return { label: "LIVRÉ", color: "bg-slate-600 text-white", icon: CheckCircle2 };
-    if (e.pourcentage_global >= 100) return { label: "TERMINÉ", color: "bg-green-600 text-white", icon: Flag };
+    if (e.pourcentage_global >= 100) return { label: "PRÊT À LIVRER", color: "bg-violet-600 text-white", icon: Flag };
     if (e.pourcentage_global > 0) return { label: "EN COURS", color: "bg-blue-600 text-white", icon: PlayCircle };
     return { label: "EN ATTENTE", color: "bg-amber-500 text-white", icon: Hourglass };
   };
 
   const periodTabs: { key: PeriodType; label: string; icon: any }[] = [
-    { key: "semaine", label: "Semaine", icon: Calendar },
-    { key: "mois", label: "Mois", icon: CalendarDays },
-    { key: "annee", label: "Annee", icon: CalendarRange },
-    { key: "custom", label: "Personnalise", icon: Target },
-    { key: "tout", label: "Tout", icon: TrendingUp },
+    { key: "jour", label: "Jour", icon: Calendar },
+    { key: "semaine", label: "Semaine", icon: CalendarDays },
+    { key: "mois", label: "Mois", icon: CalendarRange },
+    { key: "annee", label: "Année", icon: TrendingUp },
+    { key: "custom", label: "Perso", icon: Target },
+    { key: "tout", label: "Tout", icon: Clock },
+  ];
+
+  // Compteurs pour les boutons de statut (basés sur equipements filtrés hors statut)
+  const compteurs = useMemo(() => {
+    const base = equipements.filter((e) => {
+      if (selectedClient && e.client_name !== selectedClient) return false;
+      const dateRef = dateFilterType === "created" ? e.created_at : e.date_livraison_reelle;
+      if (!dateRef) return false;
+      if (filterDateExacte) {
+        if (new Date(dateRef).toISOString().slice(0, 10) !== filterDateExacte) return false;
+      } else {
+        const d = new Date(dateRef);
+        if (d < periodBounds.start || d > periodBounds.end) return false;
+      }
+      return true;
+    });
+    const livres = base.filter((e) => e.statut === "livre").length;
+    const pretALivrer = base.filter((e) => e.statut !== "livre" && e.pourcentage_global >= 100).length;
+    const enCours = base.filter((e) => e.statut !== "livre" && e.pourcentage_global > 0 && e.pourcentage_global < 100).length;
+    const enAttente = base.filter((e) => e.statut !== "livre" && e.pourcentage_global === 0).length;
+    const stagnants = base.filter((e) => stagnantIds.has(e.id)).length;
+    const urgents = base.filter((e) => e.urgence === "urgent" && e.statut !== "livre").length;
+    return { total: base.length, livres, pretALivrer, enCours, enAttente, stagnants, urgents };
+  }, [equipements, selectedClient, dateFilterType, filterDateExacte, periodBounds, stagnantIds]);
+
+  const statutButtons: { key: StatutFiltre; label: string; count: number; color: string; activeColor: string }[] = [
+    { key: "tous", label: "Tous", count: compteurs.total, color: "bg-slate-100 text-slate-600 hover:bg-slate-200", activeColor: "bg-slate-800 text-white" },
+    { key: "en_attente", label: "En attente", count: compteurs.enAttente, color: "bg-slate-100 text-slate-600 hover:bg-slate-200", activeColor: "bg-amber-500 text-white" },
+    { key: "en_cours", label: "En cours", count: compteurs.enCours, color: "bg-slate-100 text-slate-600 hover:bg-slate-200", activeColor: "bg-blue-600 text-white" },
+    { key: "pret_a_livrer", label: "Prêt à livrer", count: compteurs.pretALivrer, color: "bg-slate-100 text-slate-600 hover:bg-slate-200", activeColor: "bg-violet-600 text-white" },
+    { key: "livre", label: "Livré", count: compteurs.livres, color: "bg-slate-100 text-slate-600 hover:bg-slate-200", activeColor: "bg-slate-600 text-white" },
+    { key: "stagnant", label: "Stagnant", count: compteurs.stagnants, color: "bg-slate-100 text-slate-600 hover:bg-slate-200", activeColor: "bg-red-600 text-white" },
   ];
 
   return (
@@ -372,7 +438,7 @@ export default function VueClientPage() {
             Répertoire équipements
           </h1>
           <p className="text-sm text-slate-500">
-            Recherchez et consultez tous les équipements. Export PDF/CSV disponible.
+            Recherchez, analysez et exportez tous les équipements.
           </p>
         </div>
         {filteredEquipements.length > 0 && (
@@ -393,7 +459,7 @@ export default function VueClientPage() {
         )}
       </div>
 
-      {/* --- BOUTON FILTRES + BARRE DE RECHERCHE --- */}
+      {/* --- RECHERCHE + BOUTON FILTRES --- */}
       <div className="bg-white rounded-xl p-4 shadow-sm space-y-3">
         <div className="flex items-center gap-2">
           <div className="relative flex-1">
@@ -425,7 +491,7 @@ export default function VueClientPage() {
           </button>
         </div>
 
-        {/* --- PANNEAU DE FILTRES --- */}
+        {/* --- PANNEAU FILTRES AVANCÉS --- */}
         {showFilters && (
           <div className="pt-3 border-t border-slate-100 space-y-4">
             {/* Sélection client */}
@@ -455,7 +521,7 @@ export default function VueClientPage() {
                   {showClientList && searchClient && (
                     <div className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg divide-y divide-slate-100">
                       {filteredClients.length === 0 ? (
-                        <p className="text-sm text-slate-400 p-3 text-center">Aucun client trouve.</p>
+                        <p className="text-sm text-slate-400 p-3 text-center">Aucun client trouvé.</p>
                       ) : (
                         filteredClients.map((c) => {
                           const count = equipements.filter((e) => e.client_name === c).length;
@@ -482,16 +548,14 @@ export default function VueClientPage() {
             {/* Type + Nature */}
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Type equipement</p>
+                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Type équipement</p>
                 <select
                   value={filterType}
                   onChange={(e) => setFilterType(e.target.value)}
                   className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
                 >
                   <option value="">Tous les types</option>
-                  {typesUniques.map((t) => (
-                    <option key={t} value={t}>{t}</option>
-                  ))}
+                  {typesUniques.map((t) => <option key={t} value={t}>{t}</option>)}
                 </select>
               </div>
               <div>
@@ -502,9 +566,7 @@ export default function VueClientPage() {
                   className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
                 >
                   <option value="">Toutes les natures</option>
-                  {naturesUniques.map((n) => (
-                    <option key={n} value={n}>{n}</option>
-                  ))}
+                  {naturesUniques.map((n) => <option key={n} value={n}>{n}</option>)}
                 </select>
               </div>
             </div>
@@ -519,9 +581,7 @@ export default function VueClientPage() {
                   className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
                 >
                   <option value="">Toutes les marques</option>
-                  {marquesUniques.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
+                  {marquesUniques.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
               <div>
@@ -536,7 +596,7 @@ export default function VueClientPage() {
               </div>
             </div>
 
-            {/* NDI/DA/NS + MLE/Référence */}
+            {/* NDI + MLE */}
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">NDI/DA/NS</p>
@@ -549,7 +609,7 @@ export default function VueClientPage() {
                 />
               </div>
               <div>
-                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">MLE/Reference</p>
+                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">MLE/Référence</p>
                 <input
                   type="text"
                   placeholder="Rechercher..."
@@ -584,39 +644,31 @@ export default function VueClientPage() {
               </div>
             </div>
 
-            {/* Statut + Urgence */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Statut</p>
-                <select
-                  value={filterStatut}
-                  onChange={(e) => setFilterStatut(e.target.value as StatutFiltre)}
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                >
-                  <option value="tous">Tous les statuts</option>
-                  <option value="en_attente">En attente</option>
-                  <option value="en_cours">En cours</option>
-                  <option value="termine">Termine</option>
-                  <option value="livre">Livre</option>
-                </select>
-              </div>
-              <div>
-                <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Urgence</p>
-                <select
-                  value={filterUrgence}
-                  onChange={(e) => setFilterUrgence(e.target.value as "tous" | "urgent" | "normal")}
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                >
-                  <option value="tous">Toutes</option>
-                  <option value="urgent">Urgent uniquement</option>
-                  <option value="normal">Normal uniquement</option>
-                </select>
-              </div>
+            {/* Urgence */}
+            <div>
+              <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Urgence</p>
+              <select
+                value={filterUrgence}
+                onChange={(e) => setFilterUrgence(e.target.value as "tous" | "urgent" | "normal")}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+              >
+                <option value="tous">Toutes</option>
+                <option value="urgent">Urgent uniquement</option>
+                <option value="normal">Normal uniquement</option>
+              </select>
             </div>
 
-            {/* Date exacte */}
+            {/* Type de date + Date exacte */}
             <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Date exacte (entree)</p>
+              <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Filtrer par date</p>
+              <select
+                value={dateFilterType}
+                onChange={(e) => setDateFilterType(e.target.value as DateFilterType)}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none mb-3"
+              >
+                <option value="created">Date d'entrée</option>
+                <option value="livraison">Date de livraison</option>
+              </select>
               <input
                 type="date"
                 value={filterDateExacte}
@@ -625,101 +677,95 @@ export default function VueClientPage() {
               />
               {filterDateExacte && (
                 <p className="text-[10px] text-amber-700 mt-1">
-                  La periode est ignoree tant que la date exacte est renseignee.
+                  La période est ignorée tant que la date exacte est renseignée.
                 </p>
               )}
             </div>
 
-            {/* Période */}
-            <div>
-              <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Periode</p>
-              <div className="flex flex-wrap gap-2">
-                {periodTabs.map((p) => (
-                  <button
-                    key={p.key}
-                    onClick={() => setPeriod(p.key)}
-                    disabled={!!filterDateExacte}
-                    className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${
-                      period === p.key ? "bg-amber-500 text-neutral-900 shadow-sm" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                    } ${filterDateExacte ? "opacity-40 cursor-not-allowed" : ""}`}
-                  >
-                    <p.icon size={12} />
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-              {period === "custom" && !filterDateExacte && (
-                <div className="flex flex-wrap items-center gap-3 mt-3">
-                  <label className="text-xs font-medium text-slate-600 flex items-center gap-2">
-                    Du
-                    <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none" />
-                  </label>
-                  <label className="text-xs font-medium text-slate-600 flex items-center gap-2">
-                    au
-                    <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none" />
-                  </label>
-                </div>
-              )}
-              <p className="text-xs text-slate-500 mt-2">
-                <strong>Periode :</strong> {periodBounds.label}
-              </p>
-            </div>
-
-            {/* Bouton réinitialiser */}
+            {/* Réinitialiser */}
             {nbFiltresActifs > 0 && (
               <button
                 onClick={resetFiltres}
                 className="flex items-center gap-1.5 text-xs font-medium text-red-600 hover:bg-red-50 rounded-lg px-3 py-1.5 transition"
               >
-                <RotateCcw size={12} /> Reinitialiser tous les filtres
+                <RotateCcw size={12} /> Réinitialiser tous les filtres
               </button>
             )}
           </div>
         )}
       </div>
 
-      {/* --- KPIs --- */}
-      {filteredEquipements.length > 0 && (
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-slate-400">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
-              <Package size={10} /> Total
-            </p>
-            <p className="text-xl font-bold text-slate-800">{stats.total}</p>
+      {/* --- PÉRIODE + STATUTS --- */}
+      <div className="bg-white rounded-xl p-4 shadow-sm space-y-4">
+        {/* Période */}
+        <div>
+          <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Période</p>
+          <div className="flex flex-wrap gap-2">
+            {periodTabs.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => setPeriod(p.key)}
+                disabled={!!filterDateExacte}
+                className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${
+                  period === p.key ? "bg-amber-500 text-neutral-900 shadow-sm" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                } ${filterDateExacte ? "opacity-40 cursor-not-allowed" : ""}`}
+              >
+                <p.icon size={12} />
+                {p.label}
+              </button>
+            ))}
           </div>
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-amber-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
-              <Hourglass size={10} /> En attente
-            </p>
-            <p className="text-xl font-bold text-slate-800">{stats.enAttente}</p>
-          </div>
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-blue-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
-              <PlayCircle size={10} /> En cours
-            </p>
-            <p className="text-xl font-bold text-slate-800">{stats.enCours}</p>
-          </div>
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-green-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
-              <CheckCircle2 size={10} /> Livres
-            </p>
-            <p className="text-xl font-bold text-slate-800">{stats.livres}</p>
-          </div>
-          <div className="bg-white rounded-xl p-3 shadow-sm border-l-4 border-red-500">
-            <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
-              <Zap size={10} /> Urgents
-            </p>
-            <p className="text-xl font-bold text-slate-800">{stats.urgents}</p>
+          {period === "custom" && !filterDateExacte && (
+            <div className="flex flex-wrap items-center gap-3 mt-3">
+              <label className="text-xs font-medium text-slate-600 flex items-center gap-2">
+                Du
+                <input type="date" value={customStart} onChange={(e) => setCustomStart(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none" />
+              </label>
+              <label className="text-xs font-medium text-slate-600 flex items-center gap-2">
+                au
+                <input type="date" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none" />
+              </label>
+            </div>
+          )}
+          <p className="text-xs text-slate-500 mt-2">
+            <strong>{dateFilterType === "created" ? "Entrées" : "Livraisons"} :</strong> {periodBounds.label}
+          </p>
+        </div>
+
+        {/* Statuts rapides */}
+        <div>
+          <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-2">Statut</p>
+          <div className="flex flex-wrap gap-2">
+            {statutButtons.map((b) => (
+              <button
+                key={b.key}
+                onClick={() => setFilterStatut(b.key)}
+                className={`text-xs font-medium rounded-lg px-3 py-1.5 transition ${
+                  filterStatut === b.key ? b.activeColor : b.color
+                }`}
+              >
+                {b.label} ({b.count})
+              </button>
+            ))}
+            {/* Urgent séparé */}
+            <button
+              onClick={() => setFilterUrgence(filterUrgence === "urgent" ? "tous" : "urgent")}
+              className={`flex items-center gap-1 text-xs font-medium rounded-lg px-3 py-1.5 transition ${
+                filterUrgence === "urgent" ? "bg-red-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              }`}
+            >
+              <Zap size={11} /> Urgents ({compteurs.urgents})
+            </button>
           </div>
         </div>
-      )}
+      </div>
 
       {/* --- LISTE ÉQUIPEMENTS --- */}
       <div className="bg-white rounded-xl shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
           <h2 className="font-semibold text-slate-700 text-sm flex items-center gap-2">
             <Package size={16} className="text-amber-600" />
-            {selectedClient ? `Equipements de ${selectedClient}` : "Tous les equipements"}
+            {selectedClient ? `Équipements de ${selectedClient}` : "Tous les équipements"}
             <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-bold">
               {filteredEquipements.length}
             </span>
@@ -733,7 +779,7 @@ export default function VueClientPage() {
         ) : filteredEquipements.length === 0 ? (
           <div className="text-center py-12">
             <Package size={32} className="mx-auto text-slate-300 mb-2" />
-            <p className="text-sm text-slate-400">Aucun equipement ne correspond aux criteres.</p>
+            <p className="text-sm text-slate-400">Aucun équipement ne correspond aux critères.</p>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -747,13 +793,13 @@ export default function VueClientPage() {
                   <th className="p-2 text-left font-semibold">Marque</th>
                   <th className="p-2 text-center font-semibold">Puis.</th>
                   <th className="p-2 text-left font-semibold">NDI/DA/NS</th>
-                  <th className="p-2 text-left font-semibold">MLE/Reference</th>
+                  <th className="p-2 text-left font-semibold">MLE/Réf</th>
                   <th className="p-2 text-center font-semibold">Tension</th>
                   <th className="p-2 text-center font-semibold">Vitesse</th>
                   <th className="p-2 text-center font-semibold">Statut</th>
                   <th className="p-2 text-right font-semibold">Avanc.</th>
-                  <th className="p-2 text-center font-semibold">Entree</th>
-                  <th className="p-2 text-center font-semibold">Livre le</th>
+                  <th className="p-2 text-center font-semibold">Entrée</th>
+                  <th className="p-2 text-center font-semibold">Livré le</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -761,11 +807,19 @@ export default function VueClientPage() {
                   const statutInfo = getStatutInfo(e);
                   const StatutIcon = statutInfo.icon;
                   const isUrgent = e.urgence === "urgent" && e.statut !== "livre";
+                  const isStagnant = stagnantIds.has(e.id);
                   return (
                     <tr key={e.id} className={`hover:bg-slate-50/50 ${isUrgent ? "bg-red-50/30" : ""}`}>
-                      <td className="p-2 font-bold text-slate-800">
-                        {e.code_faratec || "—"}
+                      <td className="p-2">
+                        <button
+                          onClick={() => setSelectedEquipement(e)}
+                          className="font-bold text-amber-700 hover:text-amber-900 hover:underline transition"
+                          title="Cliquer pour voir le détail"
+                        >
+                          {e.code_faratec || "—"}
+                        </button>
                         {isUrgent && <Zap size={10} className="inline ml-1 text-red-600" />}
+                        {isStagnant && <AlertTriangle size={10} className="inline ml-1 text-red-500" />}
                       </td>
                       <td className="p-2 text-slate-600 font-medium">{e.client_name}</td>
                       <td className="p-2 text-slate-600">{e.type_equipement}</td>
@@ -793,13 +847,166 @@ export default function VueClientPage() {
         )}
       </div>
 
-      {/* --- ÉTAT VIDE INITIAL --- */}
+      {/* --- ÉTAT VIDE --- */}
       {!loading && equipements.length === 0 && (
         <div className="bg-white rounded-xl p-12 shadow-sm text-center">
           <Users size={48} className="mx-auto text-slate-300 mb-3" />
-          <p className="text-sm text-slate-500 font-medium">Aucun equipement en base.</p>
+          <p className="text-sm text-slate-500 font-medium">Aucun équipement en base.</p>
         </div>
       )}
+
+      {/* --- MODALE DÉTAIL ÉQUIPEMENT --- */}
+      {selectedEquipement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setSelectedEquipement(null)} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between sticky top-0 bg-white z-10">
+              <div>
+                <h3 className="font-bold text-slate-800 text-lg flex items-center gap-2">
+                  {selectedEquipement.code_faratec || "Sans code"}
+                </h3>
+                <p className="text-sm text-slate-500 mt-0.5">
+                  {selectedEquipement.client_name} · {selectedEquipement.type_equipement}
+                </p>
+              </div>
+              <button onClick={() => setSelectedEquipement(null)} className="text-slate-400 hover:text-slate-600 p-1 transition">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-5">
+              {/* Statut */}
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className={`text-xs px-2.5 py-1 rounded-full font-bold inline-flex items-center gap-1.5 ${getStatutInfo(selectedEquipement).color}`}>
+                  {(() => {
+                    const info = getStatutInfo(selectedEquipement);
+                    const Icon = info.icon;
+                    return <><Icon size={12} /> {info.label}</>;
+                  })()}
+                </span>
+                <span className="text-sm font-bold text-amber-700">{selectedEquipement.pourcentage_global}%</span>
+                {selectedEquipement.urgence === "urgent" && selectedEquipement.statut !== "livre" && (
+                  <span className="text-xs bg-red-600 text-white px-2 py-1 rounded-full font-bold inline-flex items-center gap-1">
+                    <Zap size={10} /> URGENT
+                  </span>
+                )}
+                {stagnantIds.has(selectedEquipement.id) && (
+                  <span className="text-xs bg-red-100 text-red-700 px-2 py-1 rounded-full font-bold inline-flex items-center gap-1">
+                    <AlertTriangle size={10} /> STAGNANT
+                  </span>
+                )}
+              </div>
+
+              {/* Informations principales */}
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3 flex items-center gap-1">
+                  <Info size={12} /> Informations principales
+                </h4>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <InfoField label="Client" value={selectedEquipement.client_name} />
+                  <InfoField label="Type" value={selectedEquipement.type_equipement} />
+                  <InfoField label="Nature des travaux" value={selectedEquipement.nature_travaux} />
+                  <InfoField label="Marque" value={selectedEquipement.marque} />
+                  <InfoField label="Puissance" value={selectedEquipement.puissance_kw !== null ? `${selectedEquipement.puissance_kw} kW` : null} />
+                  <InfoField label="Urgence" value={selectedEquipement.urgence === "urgent" ? "🔴 Urgent" : "Normal"} />
+                </div>
+              </div>
+
+              {/* Informations techniques */}
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">
+                  Informations techniques
+                </h4>
+                <div className="grid grid-cols-2 sm:grid-cols-2 gap-3">
+                  <InfoField label="NDI / DA / NS" value={selectedEquipement.ndi_da_ns} />
+                  <InfoField label="MLE / Référence" value={selectedEquipement.mle_reference} />
+                  <InfoField label="Tension" value={selectedEquipement.tension} />
+                  <InfoField label="Vitesse" value={selectedEquipement.vitesse} />
+                </div>
+              </div>
+
+              {/* Dates */}
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3 flex items-center gap-1">
+                  <CalendarClock size={12} /> Dates
+                </h4>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <InfoField label="Date d'entrée" value={formatDate(selectedEquipement.created_at)} />
+                  <InfoField label="Début intervention" value={formatDate(selectedEquipement.date_debut_intervention)} />
+                  <InfoField label="Fin intervention" value={formatDate(selectedEquipement.date_fin_intervention)} />
+                  <InfoField label="Date prévue de fin" value={formatDate(selectedEquipement.date_fin_prevue)} />
+                  <InfoField label="Date de livraison" value={formatDate(selectedEquipement.date_livraison_reelle)} />
+                  <InfoField
+                    label="Rapport établi"
+                    value={selectedEquipement.rapport_etabli === true ? "✅ Oui" : selectedEquipement.rapport_etabli === false ? "❌ Non" : "—"}
+                  />
+                </div>
+              </div>
+
+              {/* Durées calculées */}
+              <div>
+                <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3 flex items-center gap-1">
+                  <Clock size={12} /> Durées calculées
+                </h4>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <DurationField
+                    label="Délai avant réparation"
+                    value={
+                      selectedEquipement.date_debut_intervention
+                        ? `${getDaysBetween(selectedEquipement.created_at, selectedEquipement.date_debut_intervention)}j`
+                        : null
+                    }
+                    sublabel="Entrée → Début"
+                  />
+                  <DurationField
+                    label="Durée d'intervention"
+                    value={
+                      selectedEquipement.date_debut_intervention
+                        ? `${getDaysBetween(selectedEquipement.date_debut_intervention, selectedEquipement.date_fin_intervention)}j`
+                        : null
+                    }
+                    sublabel={selectedEquipement.date_fin_intervention ? "Début → Fin" : "Début → Aujourd'hui"}
+                  />
+                  <DurationField
+                    label="Durée totale"
+                    value={`${getDaysBetween(selectedEquipement.created_at, selectedEquipement.date_fin_intervention || selectedEquipement.date_livraison_reelle)}j`}
+                    sublabel="Entrée → Fin/Livraison"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-5 border-t border-slate-100 flex justify-end sticky bottom-0 bg-white">
+              <button
+                onClick={() => setSelectedEquipement(null)}
+                className="px-5 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100 rounded-lg transition"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// --- Composants helper pour la modale ---
+function InfoField({ label, value }: { label: string; value: string | null | undefined }) {
+  return (
+    <div className="bg-slate-50 rounded-lg p-3">
+      <p className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-1">{label}</p>
+      <p className="text-sm font-medium text-slate-800">{value || "—"}</p>
+    </div>
+  );
+}
+
+function DurationField({ label, value, sublabel }: { label: string; value: string | null; sublabel?: string }) {
+  return (
+    <div className="bg-white rounded-lg border border-slate-200 p-3">
+      <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-1">{label}</p>
+      <p className="text-lg font-bold text-amber-700">{value || "—"}</p>
+      {sublabel && <p className="text-[9px] text-slate-400 mt-0.5">{sublabel}</p>}
     </div>
   );
 }

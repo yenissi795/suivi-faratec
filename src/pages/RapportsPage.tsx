@@ -4,7 +4,8 @@ import {
   Calendar, CalendarDays, CalendarRange, FileDown,
   TrendingUp, AlertTriangle, Target, Users, Factory,
   Package, CalendarClock, FileSpreadsheet, Award, Activity,
-  Gauge, Coins, Wrench, Truck, Droplet, CheckCircle2, Info
+  Gauge, Coins, Wrench, Truck, Droplet, CheckCircle2, Info,
+  FileCheck, FileX
 } from "lucide-react";
 import { buildRapportPdf, buildCsv } from "../lib/reportPdf";
 import {
@@ -31,6 +32,8 @@ interface Equipement {
   nature_travaux: string | null;
   date_debut_intervention: string | null;
   date_fin_intervention: string | null;
+  date_livraison_reelle: string | null;
+  rapport_etabli: boolean | null;
 }
 interface Passage {
   id: string;
@@ -80,7 +83,7 @@ export default function RapportsPage() {
   useEffect(() => {
     const load = async () => {
       const [eqRes, passRes, atRes, opRes, sessRes, coutRes, coefRes] = await Promise.all([
-        supabase.from("equipements").select("id, client_name, type_equipement, code_faratec, statut, created_at, pourcentage_global, puissance_kw, nature_travaux, date_debut_intervention, date_fin_intervention").is("deleted_at", null),
+        supabase.from("equipements").select("id, client_name, type_equipement, code_faratec, statut, created_at, pourcentage_global, puissance_kw, nature_travaux, date_debut_intervention, date_fin_intervention, date_livraison_reelle, rapport_etabli").is("deleted_at", null),
         supabase.from("journal_passages").select("id, equipement_id, atelier_id, operateur_id, pourcentage, passage_date").is("deleted_at", null).order("passage_date", { ascending: true }),
         supabase.from("ateliers").select("id, name"),
         supabase.from("operateurs").select("id, full_name"),
@@ -162,6 +165,23 @@ export default function RapportsPage() {
     });
     return set;
   }, [equipementsActifs, passages]);
+
+  // --- RAPPORTS ETABLIS / MANQUANTS ---
+  const rapportsStats = useMemo(() => {
+    const livres = equipements.filter((e) => e.statut === "livre");
+    const livresInPeriod = livres.filter((e) => e.date_livraison_reelle && inRange(e.date_livraison_reelle, currentRange));
+
+    const etablis = livresInPeriod.filter((e) => e.rapport_etabli === true);
+    const manquants = livresInPeriod.filter((e) => e.rapport_etabli !== true);
+
+    return {
+      totalLivres: livresInPeriod.length,
+      etablis: etablis.length,
+      manquants: manquants.length,
+      taux: livresInPeriod.length > 0 ? Math.round((etablis.length / livresInPeriod.length) * 100) : 0,
+      listeManquants: manquants,
+    };
+  }, [equipements, currentRange]);
 
   const kpisActivite = useMemo(() => {
     const vus = vusIds.size;
@@ -290,11 +310,14 @@ export default function RapportsPage() {
     return { totalParType, totalHT, topEquipementsChers, coutMoyen, nbEquipementsAvecCouts: parEquipement.size };
   }, [lignesCoutInPeriod, equipements]);
 
+  // --- KPIS CLIENT ENRICHI AVEC RAPPORTS ---
   const kpisClient = useMemo(() => {
     const parClient = new Map<string, {
       nbEquipements: number;
       nbEnCours: number;
       nbLivres: number;
+      nbRapportsEtablis: number;
+      nbRapportsManquants: number;
       tempsTotalMin: number;
       coutTotal: number;
     }>();
@@ -302,13 +325,20 @@ export default function RapportsPage() {
     equipementsInPeriod.forEach((e) => {
       if (!parClient.has(e.client_name)) {
         parClient.set(e.client_name, {
-          nbEquipements: 0, nbEnCours: 0, nbLivres: 0, tempsTotalMin: 0, coutTotal: 0,
+          nbEquipements: 0, nbEnCours: 0, nbLivres: 0,
+          nbRapportsEtablis: 0, nbRapportsManquants: 0,
+          tempsTotalMin: 0, coutTotal: 0,
         });
       }
       const entry = parClient.get(e.client_name)!;
       entry.nbEquipements += 1;
-      if (e.statut === "livre") entry.nbLivres += 1;
-      else entry.nbEnCours += 1;
+      if (e.statut === "livre") {
+        entry.nbLivres += 1;
+        if (e.rapport_etabli === true) entry.nbRapportsEtablis += 1;
+        else entry.nbRapportsManquants += 1;
+      } else {
+        entry.nbEnCours += 1;
+      }
 
       const eqSessions = sessions.filter((s) => s.equipement_id === e.id);
       eqSessions.forEach((s) => {
@@ -364,6 +394,7 @@ export default function RapportsPage() {
         { label: "Passages", value: String(kpisActivite.passagesCount), color: [37, 99, 235] as [number, number, number] },
         { label: "Nouveaux", value: String(kpisActivite.nouveaux), color: [22, 163, 74] as [number, number, number] },
         { label: "Stagnants", value: String(stagnantIds.size), color: [220, 38, 38] as [number, number, number] },
+        { label: "Rapports OK", value: `${rapportsStats.taux}%`, color: [22, 163, 74] as [number, number, number] },
       ];
 
       const charts = [
@@ -387,6 +418,16 @@ export default function RapportsPage() {
             ["Nouveaux equipements", String(kpisActivite.nouveaux)],
             ["Equipements non vus", String(kpisActivite.nonVus)],
             ["Taux de stagnation", `${kpisActivite.stagnationRate}%`],
+          ],
+        },
+        {
+          heading: "Rapports etablis",
+          rows: [
+            ["Indicateur", "Valeur"] as [string, string],
+            ["Equipements livres sur la periode", String(rapportsStats.totalLivres)],
+            ["Rapports etablis", String(rapportsStats.etablis)],
+            ["Rapports manquants", String(rapportsStats.manquants)],
+            ["Taux de rapports", `${rapportsStats.taux}%`],
           ],
         },
         {
@@ -421,7 +462,14 @@ export default function RapportsPage() {
           heading: "Stats par client",
           rows: [
             ["Client", "Nb equipements"] as [string, string],
-            ...kpisClient.slice(0, 20).map((c) => [`${c.client_name} (${c.nbEnCours} en cours)`, String(c.nbEquipements)] as [string, string]),
+            ...kpisClient.slice(0, 20).map((c) => [`${c.client_name} (${c.nbEnCours} en cours, ${c.nbRapportsManquants} rapports manquants)`, String(c.nbEquipements)] as [string, string]),
+          ],
+        },
+        {
+          heading: "Rapports manquants (detail)",
+          rows: [
+            ["Equipement", "Client"] as [string, string],
+            ...rapportsStats.listeManquants.slice(0, 20).map((e) => [`${e.code_faratec || "—"}`, e.client_name] as [string, string]),
           ],
         },
         {
@@ -452,6 +500,12 @@ export default function RapportsPage() {
       ["Nouveaux", String(kpisActivite.nouveaux)],
       ["Non vus", String(kpisActivite.nonVus)],
       [],
+      ["RAPPORTS ETABLIS"],
+      ["Equipements livres", String(rapportsStats.totalLivres)],
+      ["Rapports etablis", String(rapportsStats.etablis)],
+      ["Rapports manquants", String(rapportsStats.manquants)],
+      ["Taux", `${rapportsStats.taux}%`],
+      [],
       ["PERFORMANCE"],
       ["Efficacite moyenne", `${kpisPerformance.efficaciteMoyenne}%`],
       ["Equipements termines", String(kpisPerformance.nbTermines)],
@@ -466,8 +520,12 @@ export default function RapportsPage() {
       ["TOTAL", `${kpisFinancier.totalHT.toFixed(2)} DH`],
       [],
       ["CLIENTS"],
-      ["Client", "Nb equipements", "En cours", "Livres"],
-      ...kpisClient.map((c) => [c.client_name, String(c.nbEquipements), String(c.nbEnCours), String(c.nbLivres)]),
+      ["Client", "Nb equipements", "En cours", "Livres", "Rapports etablis", "Rapports manquants"],
+      ...kpisClient.map((c) => [c.client_name, String(c.nbEquipements), String(c.nbEnCours), String(c.nbLivres), String(c.nbRapportsEtablis), String(c.nbRapportsManquants)]),
+      [],
+      ["RAPPORTS MANQUANTS (detail)"],
+      ["Code Faratec", "Client", "Type", "Date livraison"],
+      ...rapportsStats.listeManquants.map((e) => [e.code_faratec || "—", e.client_name, e.type_equipement, e.date_livraison_reelle ? new Date(e.date_livraison_reelle).toLocaleDateString("fr-FR") : "—"]),
     ];
     buildCsv(rows, `FARATEC_Rapport_${todayStr}.csv`);
   };
@@ -576,6 +634,31 @@ export default function RapportsPage() {
             </div>
           </div>
 
+          {/* RAPPORTS ETABLIS */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-green-600">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <FileCheck size={10} /> Rapports établis
+              </p>
+              <p className="text-2xl font-bold text-green-700">{rapportsStats.etablis}</p>
+              <p className="text-[10px] text-slate-400 mt-0.5">sur {rapportsStats.totalLivres} livrés</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-red-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <FileX size={10} /> Rapports manquants
+              </p>
+              <p className="text-2xl font-bold text-red-600">{rapportsStats.manquants}</p>
+              <p className="text-[10px] text-slate-400 mt-0.5">à établir</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-emerald-500 col-span-2">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Taux de rapports établis</p>
+              <p className="text-2xl font-bold text-emerald-700">{rapportsStats.taux}%</p>
+              <div className="mt-2 w-full bg-slate-100 rounded-full h-2 overflow-hidden">
+                <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${rapportsStats.taux}%` }} />
+              </div>
+            </div>
+          </div>
+
           <div className="bg-white rounded-xl p-5 shadow-sm">
             <div className="flex items-center gap-2 mb-4">
               <Activity size={16} className="text-amber-600" />
@@ -674,6 +757,27 @@ export default function RapportsPage() {
               <p className="text-2xl font-bold text-slate-800">{kpisPerformance.topOperateurs.length}</p>
             </div>
           </div>
+
+          {rapportsStats.manquants > 0 && (
+            <div className="bg-white rounded-xl p-5 shadow-sm border-l-4 border-red-500">
+              <h2 className="font-semibold text-red-800 text-sm mb-4 flex items-center gap-2">
+                <FileX size={16} className="text-red-500" />
+                Rapports manquants ({rapportsStats.manquants})
+              </h2>
+              <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto">
+                {rapportsStats.listeManquants.slice(0, 20).map((e) => (
+                  <div key={e.id} className="py-2 flex items-center justify-between text-sm">
+                    <span className="text-slate-800">
+                      <strong>{e.code_faratec || "—"}</strong> · {e.client_name}
+                    </span>
+                    <span className="text-[10px] text-slate-500">
+                      Livré le {e.date_livraison_reelle ? new Date(e.date_livraison_reelle).toLocaleDateString("fr-FR") : "—"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="bg-white rounded-xl shadow-sm overflow-hidden">
             <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-emerald-50 to-white">
@@ -855,6 +959,31 @@ export default function RapportsPage() {
             </div>
           </div>
 
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-emerald-600">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <FileCheck size={10} /> Rapports établis
+              </p>
+              <p className="text-2xl font-bold text-emerald-700">{kpisClient.reduce((s, c) => s + c.nbRapportsEtablis, 0)}</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-red-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold flex items-center gap-1">
+                <FileX size={10} /> Rapports manquants
+              </p>
+              <p className="text-2xl font-bold text-red-600">{kpisClient.reduce((s, c) => s + c.nbRapportsManquants, 0)}</p>
+            </div>
+            <div className="bg-white rounded-xl p-4 shadow-sm border-l-4 border-violet-500">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Taux de rapports</p>
+              <p className="text-2xl font-bold text-violet-700">
+                {(() => {
+                  const total = kpisClient.reduce((s, c) => s + c.nbLivres, 0);
+                  const etablis = kpisClient.reduce((s, c) => s + c.nbRapportsEtablis, 0);
+                  return total > 0 ? `${Math.round((etablis / total) * 100)}%` : "—";
+                })()}
+              </p>
+            </div>
+          </div>
+
           <div className="bg-white rounded-xl shadow-sm overflow-hidden">
             <div className="p-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-white">
               <h2 className="font-semibold text-slate-700 text-sm flex items-center gap-2">
@@ -879,8 +1008,26 @@ export default function RapportsPage() {
                     }`}>{i + 1}</span>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm font-semibold text-slate-800 truncate">{c.client_name}</p>
-                      <p className="text-[11px] text-slate-500 mt-0.5">
-                        {c.nbEnCours} en cours · {c.nbLivres} livre{c.nbLivres > 1 ? "s" : ""}
+                      <p className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2 flex-wrap">
+                        <span>{c.nbEnCours} en cours</span>
+                        <span className="text-slate-300">•</span>
+                        <span>{c.nbLivres} livré{c.nbLivres > 1 ? "s" : ""}</span>
+                        {c.nbRapportsEtablis > 0 && (
+                          <>
+                            <span className="text-slate-300">•</span>
+                            <span className="text-emerald-700 font-semibold flex items-center gap-0.5">
+                              <FileCheck size={10} /> {c.nbRapportsEtablis}
+                            </span>
+                          </>
+                        )}
+                        {c.nbRapportsManquants > 0 && (
+                          <>
+                            <span className="text-slate-300">•</span>
+                            <span className="text-red-600 font-semibold flex items-center gap-0.5">
+                              <FileX size={10} /> {c.nbRapportsManquants}
+                            </span>
+                          </>
+                        )}
                       </p>
                     </div>
                     <div className="text-right shrink-0">

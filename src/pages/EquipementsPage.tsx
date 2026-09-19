@@ -5,9 +5,10 @@ import { useAuth } from "../context/AuthContext";
 import {
   Package, Plus, Search, Edit3, Truck, Trash2, X, Loader2,
   Clock, CheckCircle2, AlertTriangle, ChevronDown, ChevronUp, History,
-  Sparkles, Filter, ZoomIn, Zap, Calculator
+  Sparkles, Filter, ZoomIn, Zap, Calculator, FileCheck
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
+import ClientSelect from "../components/ClientSelect";
 
 // --- TYPES ---
 interface Equipement {
@@ -21,6 +22,8 @@ interface Equipement {
   pourcentage_global: number;
   statut: string;
   date_livraison_reelle: string | null;
+  date_fin_prevue: string | null;
+  rapport_etabli: boolean;
   created_at: string;
   ndi_da_ns: string | null;
   mle_reference: string | null;
@@ -73,6 +76,15 @@ const EMPTY_FORM = {
   ndi_da_ns: "", mle_reference: "", marque: "",
   puissance_kw: "", tension: "", vitesse: "",
   operateur: "", urgence: "normal", nature_travaux: "",
+  date_fin_prevue: "",
+};
+
+// --- BADGE DE STATUT ---
+const getStatutInfo = (e: Equipement) => {
+  if (e.statut === "livre") return { label: "LIVRÉ", color: "bg-slate-600 text-white" };
+  if (e.pourcentage_global >= 100) return { label: "PRÊT À LIVRER", color: "bg-violet-600 text-white" };
+  if (e.pourcentage_global > 0) return { label: "EN COURS", color: "bg-blue-600 text-white" };
+  return { label: "EN ATTENTE", color: "bg-amber-500 text-white" };
 };
 
 export default function EquipementsPage() {
@@ -85,7 +97,7 @@ export default function EquipementsPage() {
   const [naturesTravaux, setNaturesTravaux] = useState<NatureTravaux[]>([]);
 
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterMode, setFilterMode] = useState<"all" | "en_cours" | "livres" | "stagnant" | "urgent">("all");
+  const [filterMode, setFilterMode] = useState<"all" | "en_cours" | "livres" | "pret_a_livrer" | "stagnant" | "urgent">("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [zoomedPhoto, setZoomedPhoto] = useState<string | null>(null);
@@ -101,6 +113,11 @@ export default function EquipementsPage() {
   const [editForm, setEditForm] = useState({ ...EMPTY_FORM });
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
   const [editSaving, setEditSaving] = useState(false);
+
+  // --- MODALE LIVRAISON ---
+  const [livraisonEquipement, setLivraisonEquipement] = useState<Equipement | null>(null);
+  const [rapportEtabli, setRapportEtabli] = useState(false);
+  const [livraisonSaving, setLivraisonSaving] = useState(false);
 
   // --- CHARGEMENT ---
   const load = async () => {
@@ -127,13 +144,14 @@ export default function EquipementsPage() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (zoomedPhoto) setZoomedPhoto(null);
+        else if (livraisonEquipement) closeLivraison();
         else if (creating) closeCreate();
         else if (editing) closeEdit();
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [creating, editing, zoomedPhoto]);
+  }, [creating, editing, zoomedPhoto, livraisonEquipement]);
 
   const dernierPassageMap = useMemo(() => {
     const map = new Map<string, Passage>();
@@ -156,17 +174,19 @@ export default function EquipementsPage() {
 
   const stats = useMemo(() => {
     const total = equipements.length;
-    const enCours = equipements.filter((e) => e.statut !== "livre").length;
+    const enCours = equipements.filter((e) => e.statut !== "livre" && e.pourcentage_global < 100).length;
+    const pretALivrer = equipements.filter((e) => e.statut !== "livre" && e.pourcentage_global >= 100).length;
     const livres = equipements.filter((e) => e.statut === "livre").length;
     const stagnants = stagnantIds.size;
     const urgents = equipements.filter((e) => e.urgence === "urgent" && e.statut !== "livre").length;
-    return { total, enCours, livres, stagnants, urgents };
+    return { total, enCours, pretALivrer, livres, stagnants, urgents };
   }, [equipements, stagnantIds]);
 
   const filteredEquipements = useMemo(() => {
     let list = [...equipements];
 
-    if (filterMode === "en_cours") list = list.filter((e) => e.statut !== "livre");
+    if (filterMode === "en_cours") list = list.filter((e) => e.statut !== "livre" && e.pourcentage_global < 100);
+    else if (filterMode === "pret_a_livrer") list = list.filter((e) => e.statut !== "livre" && e.pourcentage_global >= 100);
     else if (filterMode === "livres") list = list.filter((e) => e.statut === "livre");
     else if (filterMode === "stagnant") list = list.filter((e) => stagnantIds.has(e.id));
     else if (filterMode === "urgent") list = list.filter((e) => e.urgence === "urgent" && e.statut !== "livre");
@@ -256,6 +276,7 @@ export default function EquipementsPage() {
       operateur: newForm.operateur.trim() || null,
       urgence: newForm.urgence || "normal",
       nature_travaux: newForm.nature_travaux || null,
+      date_fin_prevue: newForm.date_fin_prevue ? new Date(newForm.date_fin_prevue).toISOString() : null,
       owner_id: user.id,
       statut: "en_attente",
       pourcentage_global: 0,
@@ -288,6 +309,7 @@ export default function EquipementsPage() {
       operateur: eq.operateur || "",
       urgence: eq.urgence || "normal",
       nature_travaux: eq.nature_travaux || "",
+      date_fin_prevue: eq.date_fin_prevue ? eq.date_fin_prevue.slice(0, 10) : "",
     });
     setEditErrors({});
   };
@@ -318,6 +340,7 @@ export default function EquipementsPage() {
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
       nature_travaux: editForm.nature_travaux || null,
+      date_fin_prevue: editForm.date_fin_prevue ? new Date(editForm.date_fin_prevue).toISOString() : null,
     };
     setEquipements((prev) => prev.map((e) => (e.id === editing.id ? updated : e)));
 
@@ -334,24 +357,47 @@ export default function EquipementsPage() {
       operateur: editForm.operateur.trim() || null,
       urgence: editForm.urgence || "normal",
       nature_travaux: editForm.nature_travaux || null,
+      date_fin_prevue: editForm.date_fin_prevue ? new Date(editForm.date_fin_prevue).toISOString() : null,
     }).eq("id", editing.id);
 
     setEditSaving(false);
     closeEdit();
   };
 
-  // --- LIVRER ---
-  const handleMarquerLivre = async (id: string) => {
-    const eq = equipements.find((e) => e.id === id);
-    if (!eq || eq.pourcentage_global < 100) return;
+  // --- LIVRAISON (avec confirmation + rapport etabli) ---
+  const openLivraison = (eq: Equipement) => {
+    if (eq.statut === "livre") return; // Securite : deja livre
+    if (eq.pourcentage_global < 100) return; // Securite : pas pret
+    setLivraisonEquipement(eq);
+    setRapportEtabli(eq.rapport_etabli || false);
+  };
+
+  const closeLivraison = () => {
+    setLivraisonEquipement(null);
+    setRapportEtabli(false);
+  };
+
+  const handleConfirmLivraison = async () => {
+    if (!livraisonEquipement) return;
+    setLivraisonSaving(true);
     const dateIso = new Date().toISOString().slice(0, 10);
+
     setEquipements((prev) =>
-      prev.map((e) => (e.id === id ? { ...e, statut: "livre", date_livraison_reelle: dateIso } : e))
+      prev.map((e) =>
+        e.id === livraisonEquipement.id
+          ? { ...e, statut: "livre", date_livraison_reelle: dateIso, rapport_etabli: rapportEtabli }
+          : e
+      )
     );
+
     await supabase.from("equipements").update({
       statut: "livre",
       date_livraison_reelle: dateIso,
-    }).eq("id", id);
+      rapport_etabli: rapportEtabli,
+    }).eq("id", livraisonEquipement.id);
+
+    setLivraisonSaving(false);
+    closeLivraison();
   };
 
   const handleDelete = async (id: string) => {
@@ -384,11 +430,10 @@ export default function EquipementsPage() {
           </div>
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Client *</label>
-            <input
+            <ClientSelect
               value={form.client_name}
-              onChange={(e) => setForm((f) => ({ ...f, client_name: e.target.value }))}
-              placeholder="Nom du client"
-              className={`w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none ${errors.client_name ? "border-red-400" : "border-slate-200"}`}
+              onChange={(val) => setForm((f) => ({ ...f, client_name: val }))}
+              error={!!errors.client_name}
             />
             {errors.client_name && <p className="text-xs text-red-600 mt-1">{errors.client_name}</p>}
           </div>
@@ -488,8 +533,20 @@ export default function EquipementsPage() {
       </div>
 
       <div>
-        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Détails</h4>
+        <h4 className="text-[10px] uppercase tracking-wider text-slate-400 font-bold mb-3">Délais & Détails</h4>
         <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">
+              Date prévue de fin <span className="text-slate-400 font-normal">(recommandée par le client)</span>
+            </label>
+            <input
+              type="date"
+              value={form.date_fin_prevue}
+              onChange={(e) => setForm((f) => ({ ...f, date_fin_prevue: e.target.value }))}
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+            <p className="text-[10px] text-slate-400 mt-1">Optionnel — permet de calculer les retards</p>
+          </div>
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
             <input
@@ -498,6 +555,8 @@ export default function EquipementsPage() {
               className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
             />
           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3 mt-3">
           <div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Nature des travaux</label>
             <SearchableSelect
@@ -534,7 +593,7 @@ export default function EquipementsPage() {
       </div>
 
       {/* --- KPIs --- */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
         <button
           onClick={() => setFilterMode("all")}
           className={`text-left bg-white rounded-xl p-3 shadow-sm border-l-4 border-slate-400 hover:shadow-md transition ${filterMode === "all" ? "ring-2 ring-amber-400" : ""}`}
@@ -548,6 +607,13 @@ export default function EquipementsPage() {
         >
           <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">En cours</p>
           <p className="text-xl font-bold text-slate-800">{stats.enCours}</p>
+        </button>
+        <button
+          onClick={() => setFilterMode("pret_a_livrer")}
+          className={`text-left bg-white rounded-xl p-3 shadow-sm border-l-4 border-violet-500 hover:shadow-md transition ${filterMode === "pret_a_livrer" ? "ring-2 ring-amber-400" : ""}`}
+        >
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">Prêts à livrer</p>
+          <p className="text-xl font-bold text-slate-800">{stats.pretALivrer}</p>
         </button>
         <button
           onClick={() => setFilterMode("urgent")}
@@ -592,6 +658,7 @@ export default function EquipementsPage() {
             <span className="text-xs text-slate-500">
               Filtre actif : <strong>{
                 filterMode === "en_cours" ? "En cours"
+                : filterMode === "pret_a_livrer" ? "Prêts à livrer"
                 : filterMode === "livres" ? "Livrés"
                 : filterMode === "urgent" ? "Urgents"
                 : "Stagnants"
@@ -629,27 +696,23 @@ export default function EquipementsPage() {
               const historique = getHistorique(e.id);
               const dernierPassage = dernierPassageMap.get(e.id);
               const isStagnant = stagnantIds.has(e.id);
-              const isNew = historique.length === 0;
               const isLivre = e.statut === "livre";
-              const canLivrer = e.pourcentage_global >= 100;
+              const isPret = !isLivre && e.pourcentage_global >= 100;
+              const canLivrer = isPret;
               const isUrgent = e.urgence === "urgent";
+              const statutInfo = getStatutInfo(e);
 
               return (
                 <div key={e.id} className={`transition ${isLivre ? "bg-slate-50/40" : isUrgent ? "bg-red-50/30" : "hover:bg-slate-50/40"}`}>
                   <div className="p-4 flex flex-col sm:flex-row sm:items-center gap-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${statutInfo.color}`}>
+                          {statutInfo.label}
+                        </span>
                         {isUrgent && !isLivre && (
                           <span className="text-[10px] bg-red-600 text-white px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                             <Zap size={9} /> URGENT
-                          </span>
-                        )}
-                        <span className="font-bold text-slate-800 text-base">
-                          {e.code_faratec || "Sans code"}
-                        </span>
-                        {isLivre && (
-                          <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-bold">
-                            LIVRÉ
                           </span>
                         )}
                         {isStagnant && !isLivre && (
@@ -657,11 +720,14 @@ export default function EquipementsPage() {
                             <AlertTriangle size={9} /> STAGNANT
                           </span>
                         )}
-                        {isNew && !isLivre && (
-                          <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-bold">
-                            NOUVEAU
+                        {isLivre && e.rapport_etabli && (
+                          <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+                            <FileCheck size={9} /> RAPPORT ÉTABLI
                           </span>
                         )}
+                        <span className="font-bold text-slate-800 text-base">
+                          {e.code_faratec || "Sans code"}
+                        </span>
                       </div>
                       <p className="text-sm text-slate-600 mt-0.5">{e.client_name}</p>
                       <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5 flex-wrap">
@@ -706,14 +772,18 @@ export default function EquipementsPage() {
                         <Calculator size={14} />
                       </button>
                       <button
-                        onClick={() => canLivrer && handleMarquerLivre(e.id)}
+                        onClick={() => openLivraison(e)}
                         disabled={!canLivrer}
                         className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium whitespace-nowrap transition ${
                           canLivrer
                             ? "text-violet-700 hover:bg-violet-50"
                             : "text-slate-300 cursor-not-allowed"
                         }`}
-                        title={canLivrer ? "Marquer comme livré" : `Impossible : équipement à ${e.pourcentage_global}% (100% requis)`}
+                        title={
+                          isLivre ? "Déjà livré" :
+                          canLivrer ? "Marquer comme livré" :
+                          `Impossible : ${e.pourcentage_global}% (100% requis)`
+                        }
                       >
                         <Truck size={14} />
                       </button>
@@ -870,6 +940,67 @@ export default function EquipementsPage() {
                 className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg px-5 py-2 text-sm font-semibold disabled:opacity-50 flex items-center gap-2 shadow-sm transition"
               >
                 {editSaving ? <><Loader2 className="animate-spin" size={14} /> Enregistrement...</> : "Enregistrer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODALE LIVRAISON --- */}
+      {livraisonEquipement && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={closeLivraison} />
+          <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-slate-800 flex items-center gap-2">
+                  <Truck size={16} className="text-violet-600" /> Confirmer la livraison
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">Vérifiez les informations avant de valider.</p>
+              </div>
+              <button onClick={closeLivraison} className="text-slate-400 hover:text-slate-600 p-1 transition">
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="bg-violet-50 border border-violet-200 rounded-lg p-3">
+                <p className="text-sm font-bold text-slate-800">{livraisonEquipement.code_faratec || "Sans code"}</p>
+                <p className="text-xs text-slate-600 mt-0.5">{livraisonEquipement.client_name} · {livraisonEquipement.type_equipement}</p>
+                <p className="text-xs text-violet-700 mt-1 font-semibold">Avancement : {livraisonEquipement.pourcentage_global}%</p>
+              </div>
+
+              <label className="flex items-start gap-3 cursor-pointer bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg p-3 transition">
+                <input
+                  type="checkbox"
+                  checked={rapportEtabli}
+                  onChange={(e) => setRapportEtabli(e.target.checked)}
+                  className="mt-0.5 w-4 h-4 accent-blue-600 cursor-pointer"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-slate-800 flex items-center gap-1.5">
+                    <FileCheck size={14} className="text-blue-600" />
+                    Rapport établi
+                  </p>
+                  <p className="text-[10px] text-slate-500 mt-0.5">Cocher si le rapport de l'équipement a été rédigé et archivé.</p>
+                </div>
+              </label>
+
+              <p className="text-xs text-slate-500 bg-amber-50 border border-amber-200 rounded-lg p-2.5">
+                ⚠️ Cette action marquera l'équipement comme <strong>livré</strong> avec la date d'aujourd'hui.
+              </p>
+            </div>
+
+            <div className="p-5 border-t border-slate-100 flex justify-end gap-2">
+              <button onClick={closeLivraison} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg transition">
+                Annuler
+              </button>
+              <button
+                onClick={handleConfirmLivraison}
+                disabled={livraisonSaving}
+                className="bg-violet-600 hover:bg-violet-700 text-white rounded-lg px-5 py-2 text-sm font-semibold disabled:opacity-50 flex items-center gap-2 shadow-sm transition"
+              >
+                {livraisonSaving ? <><Loader2 className="animate-spin" size={14} /> Validation...</> : <><Truck size={14} /> Confirmer la livraison</>}
               </button>
             </div>
           </div>
