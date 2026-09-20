@@ -338,7 +338,7 @@ export default function VueClientPage() {
     const header = [
       "Code Faratec", "Client", "Type", "Nature", "Marque", "Puissance (kW)",
       "NDI/DA/NS", "MLE/Reference", "Tension", "Vitesse", "Urgence", "Statut",
-      "Avancement (%)", "Date entree", "Date livraison",
+      "Taux d'avancement", "Date entree", "Date livraison",
     ];
 
     const rows = filteredEquipements.map((e) => {
@@ -360,7 +360,7 @@ export default function VueClientPage() {
         e.vitesse || "—",
         e.urgence === "urgent" ? "URGENT" : "Normal",
         statutLabel,
-        String(e.pourcentage_global),
+                `${e.pourcentage_global}%`,
         new Date(e.created_at).toLocaleDateString("fr-FR"),
         e.date_livraison_reelle ? new Date(e.date_livraison_reelle).toLocaleDateString("fr-FR") : "—",
       ];
