@@ -518,6 +518,7 @@ interface ClientPdfData {
   client_name: string;
   periode_label: string;
   equipements: ClientEquipement[];
+  contexte_statut?: string;
 }
 
 export async function buildClientEquipementsPdf(data: ClientPdfData): Promise<jsPDF> {
