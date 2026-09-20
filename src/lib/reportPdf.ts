@@ -1,5 +1,6 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import logoFaratec from "../assets/logo-faratec.png";
 
 const COLORS = {
   primary: [245, 158, 11] as [number, number, number],
@@ -8,6 +9,7 @@ const COLORS = {
   lightGray: [241, 245, 249] as [number, number, number],
   white: [255, 255, 255] as [number, number, number],
   red: [220, 38, 38] as [number, number, number],
+  darkRed: [192, 0, 0] as [number, number, number], // #C00000 Excel
   green: [22, 163, 74] as [number, number, number],
   blue: [37, 99, 235] as [number, number, number],
 };
@@ -29,7 +31,6 @@ interface KPI {
 }
 
 // Nettoie le texte : garde l'ASCII, enleve les accents francais proprement
-// (Atelier mecanique au lieu de Atelier m?canique)
 function sanitize(text: string): string {
   return String(text)
     .replace(/→/g, "->")
@@ -44,6 +45,95 @@ function sanitize(text: string): string {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
+// --- HELPERS LOGO ---
+async function loadLogoBase64(): Promise<string | null> {
+  try {
+    const response = await fetch(logoFaratec);
+    const blob = await response.blob();
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.onerror = () => resolve(null);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return null;
+  }
+}
+
+function getImageFormat(dataUrl: string): "PNG" | "JPEG" | "WEBP" {
+  if (dataUrl.includes("image/png")) return "PNG";
+  if (dataUrl.includes("image/jpeg") || dataUrl.includes("image/jpg")) return "JPEG";
+  return "PNG";
+}
+
+// --- DESSINER L'EN-TÊTE STANDARD (logo gauche + titre centre + logo droite) ---
+function drawHeader(
+  doc: jsPDF,
+  logoBase64: string | null,
+  title: string,
+  subtitle: string | null,
+  pageWidth: number,
+  headerHeight: number = 30
+): void {
+  // Fond sombre
+  doc.setFillColor(...COLORS.dark);
+  doc.rect(0, 0, pageWidth, headerHeight, "F");
+  // Ligne doree
+  doc.setFillColor(...COLORS.primary);
+  doc.rect(0, headerHeight, pageWidth, 1.2, "F");
+
+  const logoSize = 20;
+  const logoY = (headerHeight - logoSize) / 2;
+
+  // Logo gauche
+  if (logoBase64) {
+    try {
+      doc.addImage(logoBase64, getImageFormat(logoBase64), 8, logoY, logoSize, logoSize);
+    } catch (e) {
+      // Ignore les erreurs d'image
+    }
+  }
+
+  // Logo droite
+  if (logoBase64) {
+    try {
+      doc.addImage(logoBase64, getImageFormat(logoBase64), pageWidth - 8 - logoSize, logoY, logoSize, logoSize);
+    } catch (e) {
+      // Ignore les erreurs d'image
+    }
+  }
+
+  // Titre centre
+  doc.setTextColor(...COLORS.white);
+  doc.setFontSize(14);
+  doc.setFont("helvetica", "bold");
+  doc.text(sanitize(title), pageWidth / 2, headerHeight / 2 - 2, { align: "center" });
+
+  // Sous-titre
+  if (subtitle) {
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(200, 200, 200);
+    doc.text(sanitize(subtitle), pageWidth / 2, headerHeight / 2 + 5, { align: "center" });
+  }
+}
+
+// --- DESSINER LE PIED DE PAGE ---
+function drawFooter(doc: jsPDF, pageWidth: number, pageHeight: number, label: string = "FARATEC - Document confidentiel") {
+  const totalPages = doc.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setDrawColor(...COLORS.lightGray);
+    doc.setLineWidth(0.3);
+    doc.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
+    doc.setFontSize(7);
+    doc.setTextColor(...COLORS.gray);
+    doc.text(label, 14, pageHeight - 7);
+    doc.text(`Page ${i} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: "right" });
+  }
+}
+
 export async function buildRapportPdf(
   title: string,
   periodLabel: string,
@@ -55,38 +145,18 @@ export async function buildRapportPdf(
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
 
+  const logoBase64 = await loadLogoBase64();
+
   // --- EN-TETE ---
-  doc.setFillColor(...COLORS.dark);
-  doc.rect(0, 0, pageWidth, 32, "F");
-  doc.setFillColor(...COLORS.primary);
-  doc.rect(0, 32, pageWidth, 1.5, "F");
+  drawHeader(doc, logoBase64, title, periodLabel, pageWidth, 30);
 
-  doc.setTextColor(...COLORS.white);
-  doc.setFontSize(20);
-  doc.setFont("helvetica", "bold");
-  doc.text("FARATEC", 14, 15);
-
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(200, 200, 200);
-  doc.text("Suivi des travaux d'atelier", 14, 22);
-
-  doc.setTextColor(...COLORS.primary);
-  doc.setFontSize(14);
-  doc.setFont("helvetica", "bold");
-  doc.text(sanitize(title), pageWidth - 14, 15, { align: "right" });
-
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(200, 200, 200);
-  doc.text(sanitize(periodLabel), pageWidth - 14, 22, { align: "right" });
-
+  // Date de generation
   doc.setFontSize(8);
-  doc.setTextColor(150, 150, 150);
+  doc.setTextColor(...COLORS.gray);
   doc.text(
     `Genere le ${new Date().toLocaleDateString("fr-FR")} a ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`,
     pageWidth - 14,
-    28,
+    36,
     { align: "right" }
   );
 
@@ -191,7 +261,7 @@ export async function buildRapportPdf(
 
     doc.setFontSize(10);
     doc.setFont("helvetica", "bold");
-    doc.setTextColor(...COLORS.dark);
+    doc.setTextColor(...COLORS.darkRed);
     doc.text(sanitize(section.heading), 14, cursorY);
     cursorY += 4;
 
@@ -199,14 +269,21 @@ export async function buildRapportPdf(
       startY: cursorY,
       head: [[sanitize(section.rows[0][0]), sanitize(section.rows[0][1])]],
       body: section.rows.slice(1).map((r) => [sanitize(r[0]), sanitize(r[1])]),
-      theme: "striped",
+      theme: "grid",
       headStyles: {
         fillColor: COLORS.dark,
         textColor: COLORS.primary,
         fontStyle: "bold",
         fontSize: 8,
+        lineColor: [200, 200, 200],
+        lineWidth: 0.1,
       },
-      bodyStyles: { fontSize: 8, textColor: COLORS.dark },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: COLORS.dark,
+        lineColor: [220, 220, 220],
+        lineWidth: 0.1,
+      },
       alternateRowStyles: { fillColor: [248, 250, 252] },
       margin: { left: 14, right: 14 },
     });
@@ -215,17 +292,7 @@ export async function buildRapportPdf(
   });
 
   // --- PIED DE PAGE ---
-  const totalPages = doc.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) {
-    doc.setPage(i);
-    doc.setDrawColor(...COLORS.lightGray);
-    doc.setLineWidth(0.3);
-    doc.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
-    doc.setFontSize(7);
-    doc.setTextColor(...COLORS.gray);
-    doc.text("FARATEC - Document interne confidentiel", 14, pageHeight - 7);
-    doc.text(`Page ${i} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: "right" });
-  }
+  drawFooter(doc, pageWidth, pageHeight);
 
   return doc;
 }
@@ -243,6 +310,7 @@ export function buildCsv(rows: string[][], filename: string) {
   link.click();
   URL.revokeObjectURL(url);
 }
+
 // =========================================================
 // FICHE DE COÛT PDF
 // =========================================================
@@ -276,28 +344,18 @@ export async function buildFicheCoutPdf(data: FicheCoutData): Promise<jsPDF> {
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
 
-  // --- EN-TÊTE ---
-  doc.setFillColor(...COLORS.dark);
-  doc.rect(0, 0, pageWidth, 32, "F");
-  doc.setFillColor(...COLORS.primary);
-  doc.rect(0, 32, pageWidth, 1.5, "F");
+  const logoBase64 = await loadLogoBase64();
 
-  doc.setTextColor(...COLORS.white);
-  doc.setFontSize(20);
-  doc.setFont("helvetica", "bold");
-  doc.text("FARATEC", 14, 15);
+  // --- EN-TETE ---
+  drawHeader(doc, logoBase64, "FICHE DE COUT", `${data.code_faratec || ""} - ${data.client_name || ""}`, pageWidth, 30);
 
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(200, 200, 200);
-  doc.text("Calcul des couts de la remise en etat", 14, 22);
-
-  doc.setFontSize(9);
-  doc.setTextColor(150, 150, 150);
+  // Date generation
+  doc.setFontSize(8);
+  doc.setTextColor(...COLORS.gray);
   doc.text(
     `Genere le ${new Date().toLocaleDateString("fr-FR")} a ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`,
     pageWidth - 14,
-    28,
+    36,
     { align: "right" }
   );
 
@@ -344,7 +402,6 @@ export async function buildFicheCoutPdf(data: FicheCoutData): Promise<jsPDF> {
       cursorY = 20;
     }
 
-    // Titre de section
     doc.setFillColor(...COLORS.primary);
     doc.roundedRect(14, cursorY, pageWidth - 28, 7, 1, 1, "F");
     doc.setTextColor(...COLORS.white);
@@ -390,15 +447,21 @@ export async function buildFicheCoutPdf(data: FicheCoutData): Promise<jsPDF> {
         fontStyle: "bold",
         fontSize: 8,
         halign: "left",
+        lineColor: [200, 200, 200],
+        lineWidth: 0.1,
       },
-      bodyStyles: { fontSize: 8, textColor: COLORS.dark },
+      bodyStyles: {
+        fontSize: 8,
+        textColor: COLORS.dark,
+        lineColor: [220, 220, 220],
+        lineWidth: 0.1,
+      },
       alternateRowStyles: { fillColor: [248, 250, 252] },
       margin: { left: 14, right: 14 },
     });
 
     cursorY = (doc as any).lastAutoTable.finalY + 2;
 
-    // Total section
     doc.setFillColor(254, 243, 199);
     doc.rect(14, cursorY, pageWidth - 28, 7, "F");
     doc.setTextColor(...COLORS.dark);
@@ -427,17 +490,7 @@ export async function buildFicheCoutPdf(data: FicheCoutData): Promise<jsPDF> {
   doc.text(`${data.totalHT.toFixed(2)} DH`, pageWidth - 20, cursorY + 10, { align: "right" });
 
   // --- PIED DE PAGE ---
-  const totalPages = doc.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) {
-    doc.setPage(i);
-    doc.setDrawColor(...COLORS.lightGray);
-    doc.setLineWidth(0.3);
-    doc.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
-    doc.setFontSize(7);
-    doc.setTextColor(...COLORS.gray);
-    doc.text("FARATEC - Document interne confidentiel", 14, pageHeight - 7);
-    doc.text(`Page ${i} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: "right" });
-  }
+  drawFooter(doc, pageWidth, pageHeight);
 
   return doc;
 }
@@ -472,44 +525,23 @@ export async function buildClientEquipementsPdf(data: ClientPdfData): Promise<js
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
 
-  // --- EN-TÊTE ---
-  doc.setFillColor(...COLORS.dark);
-  doc.rect(0, 0, pageWidth, 28, "F");
-  doc.setFillColor(...COLORS.primary);
-  doc.rect(0, 28, pageWidth, 1.5, "F");
+  const logoBase64 = await loadLogoBase64();
 
-  doc.setTextColor(...COLORS.white);
-  doc.setFontSize(18);
-  doc.setFont("helvetica", "bold");
-  doc.text("FARATEC", 14, 13);
+  // --- EN-TETE ---
+  const headerTitle = `ETAT DES EQUIPEMENTS - ${data.client_name}`;
+  drawHeader(doc, logoBase64, headerTitle, data.periode_label, pageWidth, 30);
 
-  doc.setFontSize(10);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(200, 200, 200);
-  doc.text("Etat des equipements", 14, 20);
-
-  // Client à droite
-  doc.setTextColor(...COLORS.primary);
-  doc.setFontSize(14);
-  doc.setFont("helvetica", "bold");
-  doc.text(sanitize(data.client_name), pageWidth - 14, 13, { align: "right" });
-
-  doc.setFontSize(9);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(200, 200, 200);
-  doc.text(sanitize(data.periode_label), pageWidth - 14, 20, { align: "right" });
-
-  // Date génération
+  // Date generation
   doc.setFontSize(8);
-  doc.setTextColor(150, 150, 150);
+  doc.setTextColor(...COLORS.gray);
   doc.text(
     `Genere le ${new Date().toLocaleDateString("fr-FR")} a ${new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`,
     pageWidth - 14,
-    25,
+    36,
     { align: "right" }
   );
 
-  let cursorY = 38;
+  let cursorY = 44;
 
   // --- RÉSUMÉ ---
   const total = data.equipements.length;
@@ -545,7 +577,7 @@ export async function buildClientEquipementsPdf(data: ClientPdfData): Promise<js
     "Vitesse",
     "Urg.",
     "Statut",
-    "Avanc.",
+    "Taux d'avancement",
     "Entree",
     "Livre le",
   ]];
@@ -560,7 +592,7 @@ export async function buildClientEquipementsPdf(data: ClientPdfData): Promise<js
     sanitize(e.tension || "—"),
     sanitize(e.vitesse || "—"),
     e.urgence === "urgent" ? "URGENT" : "—",
-    e.statut === "livre" ? "Livre" : (e.pourcentage_global >= 100 ? "Termine" : (e.pourcentage_global > 0 ? "En cours" : "En attente")),
+    e.statut === "livre" ? "Livre" : (e.pourcentage_global >= 100 ? "Pret a livrer" : (e.pourcentage_global > 0 ? "En cours" : "En attente")),
     `${e.pourcentage_global}%`,
     new Date(e.created_at).toLocaleDateString("fr-FR"),
     e.date_livraison_reelle ? new Date(e.date_livraison_reelle).toLocaleDateString("fr-FR") : "—",
@@ -570,17 +602,21 @@ export async function buildClientEquipementsPdf(data: ClientPdfData): Promise<js
     startY: cursorY,
     head: tableHead,
     body: tableBody,
-    theme: "striped",
+    theme: "grid",
     headStyles: {
       fillColor: COLORS.dark,
       textColor: COLORS.primary,
       fontStyle: "bold",
       fontSize: 7,
       halign: "center",
+      lineColor: [200, 200, 200],
+      lineWidth: 0.1,
     },
     bodyStyles: {
       fontSize: 7,
       textColor: COLORS.dark,
+      lineColor: [220, 220, 220],
+      lineWidth: 0.1,
     },
     alternateRowStyles: {
       fillColor: [248, 250, 252],
@@ -595,7 +631,6 @@ export async function buildClientEquipementsPdf(data: ClientPdfData): Promise<js
     },
     margin: { left: 14, right: 14 },
     didParseCell: (data: any) => {
-      // Colorer les lignes urgentes
       if (data.section === "body" && data.row.raw[8] === "URGENT") {
         data.cell.styles.textColor = [220, 38, 38];
         data.cell.styles.fontStyle = "bold";
@@ -604,17 +639,7 @@ export async function buildClientEquipementsPdf(data: ClientPdfData): Promise<js
   });
 
   // --- PIED DE PAGE ---
-  const totalPages = doc.getNumberOfPages();
-  for (let i = 1; i <= totalPages; i++) {
-    doc.setPage(i);
-    doc.setDrawColor(...COLORS.lightGray);
-    doc.setLineWidth(0.3);
-    doc.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
-    doc.setFontSize(7);
-    doc.setTextColor(...COLORS.gray);
-    doc.text("FARATEC - Document confidentiel", 14, pageHeight - 7);
-    doc.text(`Page ${i} / ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: "right" });
-  }
+  drawFooter(doc, pageWidth, pageHeight);
 
   return doc;
 }
