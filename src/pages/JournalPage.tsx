@@ -120,7 +120,7 @@ const getStatutInfo = (statut: string, pourcentage: number): { key: StatutKey; l
   if (statut === "livre") return { key: "livre", label: "LIVRÉ", color: "bg-slate-600 text-white", icon: CheckCircle2 };
   if (pourcentage >= 100) return { key: "pret_a_livrer", label: "PRÊT À LIVRER", color: "bg-violet-600 text-white", icon: Flag };
   if (pourcentage > 0) return { key: "en_cours", label: "EN COURS", color: "bg-blue-600 text-white", icon: PlayCircle };
-  return { key: "en_attente", label: "EN ATTENTE", color: "bg-amber-500 text-white", icon: Hourglass };
+  return { key: "en_attente", label: "À PLANIFIER", color: "bg-amber-500 text-white", icon: Hourglass };
 };
 
 const EMPTY_NEW_EQ = {
@@ -184,7 +184,7 @@ export default function JournalPage() {
   const [tourneeActive, setTourneeActive] = useState<Tournee | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
-  const [filterMode, setFilterMode] = useState<"all" | "en_attente" | "en_cours" | "pret_a_livrer" | "not_seen_today" | "stagnant">("all");
+  const [filterMode, setFilterMode] = useState<"all" | "en_attente" | "en_cours" | "pret_a_livrer" | "not_seen_today" | "stagnant" | "en_travaux">("all");
   const [showLivre, setShowLivre] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
@@ -384,6 +384,23 @@ export default function JournalPage() {
     return map;
   }, [passages, sessions, equipements]);
 
+  // --- EQUIPEMENTS EN TRAVAUX (avec timer actif) ---
+  const equipementsEnTravaux = useMemo(() => {
+    const result: { equipement: Equipement; sessions: SessionOperateur[] }[] = [];
+    equipements.forEach((eq) => {
+      if (eq.statut === "livre") return;
+      const sess = sessionsActivesParEquipement.get(eq.id) || [];
+      if (sess.length > 0) {
+        result.push({ equipement: eq, sessions: sess });
+      }
+    });
+    return result.sort((a, b) => {
+      const dateA = Math.min(...a.sessions.map((s) => new Date(s.started_at).getTime()));
+      const dateB = Math.min(...b.sessions.map((s) => new Date(s.started_at).getTime()));
+      return dateA - dateB;
+    });
+  }, [equipements, sessionsActivesParEquipement]);
+
   const hasActiveSession = useMemo(() => {
     if (!selectedEquipement || !operateurId) return false;
     return sessions.some(
@@ -406,6 +423,7 @@ export default function JournalPage() {
     let list = equipements.filter((e) => e.statut !== "livre");
 
     if (filterMode === "en_attente") list = list.filter((e) => e.pourcentage_global === 0);
+    else if (filterMode === "en_travaux") list = list.filter((e) => (sessionsActivesParEquipement.get(e.id) || []).length > 0);
     else if (filterMode === "en_cours") list = list.filter((e) => e.pourcentage_global > 0 && e.pourcentage_global < 100);
     else if (filterMode === "pret_a_livrer") list = list.filter((e) => e.pourcentage_global >= 100);
     else if (filterMode === "not_seen_today") {
@@ -1219,13 +1237,16 @@ export default function JournalPage() {
               <Filter size={12} /> Tous ({equipements.filter((e) => e.statut !== "livre").length})
             </button>
             <button onClick={() => setFilterMode("en_attente")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "en_attente" ? "bg-amber-500 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
-              <Hourglass size={12} /> En attente ({statsStatuts.enAttente})
+              <Hourglass size={12} /> À planifier ({statsStatuts.enAttente})
             </button>
             <button onClick={() => setFilterMode("en_cours")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "en_cours" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
               <PlayCircle size={12} /> En cours ({statsStatuts.enCours})
             </button>
             <button onClick={() => setFilterMode("pret_a_livrer")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "pret_a_livrer" ? "bg-violet-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
               <Flag size={12} /> Prêts à livrer ({statsStatuts.pretALivrer})
+            </button>
+            <button onClick={() => setFilterMode("en_travaux")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "en_travaux" ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
+              <PlayCircle size={12} /> En travaux ({equipementsEnTravaux.length})
             </button>
             <button onClick={() => setFilterMode("not_seen_today")} className={`flex items-center gap-1.5 text-xs font-medium rounded-lg px-3 py-1.5 transition ${filterMode === "not_seen_today" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>
               <Clock size={12} /> Non vus aujourd'hui

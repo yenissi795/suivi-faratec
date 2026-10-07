@@ -8,6 +8,7 @@ import {
   Sparkles, Filter, ZoomIn, Zap, Calculator, FileCheck
 } from "lucide-react";
 import SearchableSelect from "../components/SearchableSelect";
+import PhotoUploadMultiple from "../components/PhotoUploadMultiple";
 import ClientSelect from "../components/ClientSelect";
 
 // --- TYPES ---
@@ -18,6 +19,8 @@ interface Equipement {
   code_faratec: string | null;
   marque: string | null;
   puissance_kw: number | null;
+  courant_a: number | null;
+  photos: string[] | null;
   operateur: string | null;
   pourcentage_global: number;
   statut: string;
@@ -75,7 +78,9 @@ const EMPTY_FORM = {
   code_faratec: "", client_name: "", type_equipement: "",
   ndi_da_ns: "", mle_reference: "", marque: "",
   puissance_kw: "", tension: "", vitesse: "",
+  courant_a: "",
   operateur: "", urgence: "normal", nature_travaux: "",
+  photos: [] as string[],
   date_fin_prevue: "",
 };
 
@@ -271,6 +276,8 @@ export default function EquipementsPage() {
       mle_reference: newForm.mle_reference.trim() || null,
       marque: newForm.marque.trim() || null,
       puissance_kw: newForm.puissance_kw ? parseFloat(newForm.puissance_kw) : null,
+      courant_a: newForm.courant_a ? parseFloat(newForm.courant_a) : null,
+      photos: newForm.photos,
       tension: newForm.tension.trim() || null,
       vitesse: newForm.vitesse.trim() || null,
       operateur: newForm.operateur.trim() || null,
@@ -304,6 +311,8 @@ export default function EquipementsPage() {
       mle_reference: eq.mle_reference || "",
       marque: eq.marque || "",
       puissance_kw: eq.puissance_kw ? String(eq.puissance_kw) : "",
+      courant_a: eq.courant_a ? String(eq.courant_a) : "",
+      photos: eq.photos || [],
       tension: eq.tension || "",
       vitesse: eq.vitesse || "",
       operateur: eq.operateur || "",
@@ -335,6 +344,8 @@ export default function EquipementsPage() {
       mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
       puissance_kw: editForm.puissance_kw ? parseFloat(editForm.puissance_kw) : null,
+      courant_a: editForm.courant_a ? parseFloat(editForm.courant_a) : null,
+      photos: editForm.photos,
       tension: editForm.tension.trim() || null,
       vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
@@ -352,6 +363,8 @@ export default function EquipementsPage() {
       mle_reference: editForm.mle_reference.trim() || null,
       marque: editForm.marque.trim() || null,
       puissance_kw: editForm.puissance_kw ? parseFloat(editForm.puissance_kw) : null,
+      courant_a: editForm.courant_a ? parseFloat(editForm.courant_a) : null,
+      photos: editForm.photos,
       tension: editForm.tension.trim() || null,
       vitesse: editForm.vitesse.trim() || null,
       operateur: editForm.operateur.trim() || null,
@@ -548,6 +561,27 @@ export default function EquipementsPage() {
             <p className="text-[10px] text-slate-400 mt-1">Optionnel — permet de calculer les retards</p>
           </div>
           <div>
+          <div>
+            <label className="text-xs font-medium text-slate-600 block mb-1">Courant (A)</label>
+            <input
+              type="number"
+              step="0.01"
+              value={form.courant_a}
+              onChange={(e) => setForm((f) => ({ ...f, courant_a: e.target.value }))}
+              placeholder="Ex: 10.5"
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none"
+            />
+          </div>
+          <div className="sm:col-span-2 lg:col-span-3">
+            <PhotoUploadMultiple
+              currentUrls={form.photos}
+              onUploaded={(url) => setForm((f) => ({ ...f, photos: [...f.photos, url] }))}
+              onRemoved={(url) => setForm((f) => ({ ...f, photos: f.photos.filter((p) => p !== url) }))}
+              maxPhotos={3}
+              bucketName="journal-photos"
+              folderName="equipements"
+            />
+          </div>
             <label className="text-xs font-medium text-slate-600 block mb-1">Opérateur</label>
             <input
               value={form.operateur}
